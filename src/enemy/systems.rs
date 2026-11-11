@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision};
-use crate::common::types::{Soldier, Team};
+use crate::common::types::{Soldier, Stance, Team};
 use crate::enemy::ai::{Enemy, EnemyAiState, ENEMY_WAYPOINTS};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
@@ -74,7 +74,7 @@ pub fn setup_enemy(
                 Soldier {
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
-                    is_crouched: false,
+                    stance: Stance::Standing,
                 },
             ))
             .id();
@@ -172,9 +172,26 @@ pub fn update_enemy(
                     (w_pos - enemy_pos).length() < 2.5
                 });
 
-                // Advance if player is beyond close firing range
-                if dist > 6.0 {
-                    soldier.is_crouched = false;
+                if dist > 14.0 {
+                    // Long-range engagement: drop prone to snipe with high cover profile (80% miss protection)
+                    soldier.stance = Stance::Prone;
+                    let desired_move = soldier.facing_dir;
+                    let move_dir = find_avoidance_direction(
+                        enemy_pos,
+                        desired_move,
+                        &buildings,
+                        &low_walls,
+                        soldier_radius,
+                    );
+                    let crawl_speed = enemy.speed * 0.32;
+                    let next_pos = enemy_pos + move_dir * crawl_speed * dt;
+                    let resolved =
+                        resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
+                    tf.translation.x = resolved.x;
+                    tf.translation.z = resolved.y;
+                } else if dist > 6.0 {
+                    // Medium-long range: advance at standing speed towards player
+                    soldier.stance = Stance::Standing;
                     let desired_move = soldier.facing_dir;
                     let move_dir = find_avoidance_direction(
                         enemy_pos,
@@ -188,11 +205,11 @@ pub fn update_enemy(
                         resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
-                } else if near_low_wall || dist > 4.0 {
-                    // Duck down into crouch behind cover or to reduce target silhouette while firing
-                    soldier.is_crouched = true;
+                } else if near_low_wall || dist > 3.5 {
+                    // Duck down into crouch behind low wall or medium range
+                    soldier.stance = Stance::Crouching;
                 } else {
-                    soldier.is_crouched = false;
+                    soldier.stance = Stance::Standing;
                 }
 
                 // Fire at player
@@ -202,7 +219,7 @@ pub fn update_enemy(
 
                     // If crouched behind a low wall, pop up to standing to shoot over the wall
                     if near_low_wall {
-                        soldier.is_crouched = false;
+                        soldier.stance = Stance::Standing;
                     }
 
                     let spawn_pos =
@@ -219,7 +236,7 @@ pub fn update_enemy(
                             speed: 38.0,
                             lifetime: 1.6,
                             team: Team::Enemy,
-                            shooter_crouched: soldier.is_crouched,
+                            shooter_stance: soldier.stance,
                         },
                     ));
                 }
@@ -231,7 +248,7 @@ pub fn update_enemy(
 
                     if dist > 1.2 {
                         // Move toward last known position at full standing speed
-                        soldier.is_crouched = false;
+                        soldier.stance = Stance::Standing;
                         let desired_move = to_target / dist;
                         let move_dir = find_avoidance_direction(
                             enemy_pos,
@@ -248,7 +265,7 @@ pub fn update_enemy(
                         tf.translation.z = resolved.y;
                     } else {
                         // At last known position: crouch low, look around and search
-                        soldier.is_crouched = true;
+                        soldier.stance = Stance::Crouching;
                         enemy.investigate_timer.tick(time.delta());
                         let scan_angle = time.elapsed_secs() * 3.0;
                         soldier.facing_dir = Vec2::new(scan_angle.cos(), scan_angle.sin());
@@ -264,7 +281,7 @@ pub fn update_enemy(
             }
             EnemyAiState::Search => {
                 // Standing during routine perimeter patrol
-                soldier.is_crouched = false;
+                soldier.stance = Stance::Standing;
                 let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
                 let to_wp = target_wp - enemy_pos;
                 let dist = to_wp.length();
@@ -291,13 +308,13 @@ pub fn update_enemy(
             }
         }
 
-        // Apply visual rotation from facing direction and scale down when crouching
+        // Apply visual rotation from facing direction and scale according to stance
         let yaw = f32::atan2(-soldier.facing_dir.x, -soldier.facing_dir.y);
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
-        tf.scale = if soldier.is_crouched {
-            Vec3::splat(0.72) // Compact profile indicating crouching posture
-        } else {
-            Vec3::ONE
+        tf.scale = match soldier.stance {
+            Stance::Standing => Vec3::ONE,
+            Stance::Crouching => Vec3::splat(0.72),
+            Stance::Prone => Vec3::new(0.55, 1.15, 0.55),
         };
     }
 }

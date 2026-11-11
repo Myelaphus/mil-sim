@@ -4,7 +4,7 @@ use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     line_intersects_box, resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{Soldier, Team};
+use crate::common::types::{Soldier, Stance, Team};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 #[derive(Component)]
@@ -39,7 +39,7 @@ pub fn setup_player(
             Soldier {
                 facing_dir: Vec2::new(0.0, -1.0), // Facing North (-Z)
                 shoot_cooldown: Timer::from_seconds(0.12, TimerMode::Once),
-                is_crouched: false,
+                stance: Stance::Standing,
             },
         ))
         .id();
@@ -68,15 +68,26 @@ pub fn update_player(
         return;
     };
 
-    // 1. Crouch toggle (C button) & visual scale feedback
+    // 1. Stance toggles (C for crouch, V for prone) & visual scale feedback
     if keyboard_input.just_pressed(KeyCode::KeyC) {
-        soldier.is_crouched = !soldier.is_crouched;
+        soldier.stance = if soldier.stance == Stance::Crouching {
+            Stance::Standing
+        } else {
+            Stance::Crouching
+        };
+    }
+    if keyboard_input.just_pressed(KeyCode::KeyV) {
+        soldier.stance = if soldier.stance == Stance::Prone {
+            Stance::Standing
+        } else {
+            Stance::Prone
+        };
     }
 
-    soldier_tf.scale = if soldier.is_crouched {
-        Vec3::splat(0.72) // Compact profile indicating crouching posture
-    } else {
-        Vec3::ONE
+    soldier_tf.scale = match soldier.stance {
+        Stance::Standing => Vec3::ONE,
+        Stance::Crouching => Vec3::splat(0.72), // Compact profile indicating crouching posture
+        Stance::Prone => Vec3::new(0.55, 1.15, 0.55), // Elongated narrow crawler profile
     };
 
     // 2. WASD / Arrow keys movement with obstacle & soldier collision
@@ -96,10 +107,10 @@ pub fn update_player(
 
     if move_delta.length_squared() > 0.0 {
         let base_speed = 12.0;
-        let speed = if soldier.is_crouched {
-            base_speed * 0.55 // Slower tactical crouch-walking
-        } else {
-            base_speed
+        let speed = match soldier.stance {
+            Stance::Standing => base_speed,
+            Stance::Crouching => base_speed * 0.55, // Slower tactical crouch-walking
+            Stance::Prone => base_speed * 0.23,     // Very slow crawling speed
         };
         let delta = move_delta.normalize() * speed * time.delta_secs();
         let soldier_radius = 0.6;
@@ -162,9 +173,9 @@ pub fn update_player(
         let soldier_pos = Vec2::new(soldier_tf.translation.x, soldier_tf.translation.z);
         let spawn_pos = soldier_pos + soldier.facing_dir * 0.85;
 
-        // When crouched, shots aimed directly into/across an adjacent low wall cannot pass through
+        // When crouched or prone, shots aimed directly into/across an adjacent low wall cannot pass through
         let mut muzzle_blocked = false;
-        if soldier.is_crouched {
+        if soldier.stance != Stance::Standing {
             for (w_tf, w_collider) in &low_walls_q {
                 let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
                 let w_min = w_center - w_collider.half_size;
@@ -192,7 +203,7 @@ pub fn update_player(
                     speed: 45.0,
                     lifetime: 1.5,
                     team: Team::Player,
-                    shooter_crouched: soldier.is_crouched,
+                    shooter_stance: soldier.stance,
                 },
             ));
         }

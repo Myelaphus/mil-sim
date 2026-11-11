@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use crate::common::geometry::line_intersects_box;
-use crate::common::types::{Soldier, Team};
+use crate::common::types::{Soldier, Stance, Team};
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
 
 #[derive(Component)]
@@ -10,7 +10,7 @@ pub struct Bullet {
     pub speed: f32,
     pub lifetime: f32,
     pub team: Team,
-    pub shooter_crouched: bool,
+    pub shooter_stance: Stance,
 }
 
 #[derive(Resource)]
@@ -71,8 +71,8 @@ pub fn update_bullets(
             continue;
         }
 
-        // 2. Check low wall collision: bullets fired while crouched cannot clear waist-height walls
-        if bullet.shooter_crouched {
+        // 2. Check low wall collision: bullets fired while crouched or prone cannot clear waist-height walls
+        if bullet.shooter_stance != Stance::Standing {
             let mut hit_low_wall = false;
             for (w_tf, collider) in &low_walls {
                 let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
@@ -97,8 +97,8 @@ pub fn update_bullets(
             if bullet.team != *char_team {
                 let char_pos = Vec2::new(char_tf.translation.x, char_tf.translation.z);
                 if (bullet_pos - char_pos).length_squared() < hit_dist_sq {
-                    if soldier.is_crouched {
-                        // Check if crouched character is protected behind a low wall
+                    if soldier.stance != Stance::Standing {
+                        // Check if crouched or prone character is protected behind a low wall
                         let mut protected_by_wall = false;
                         for (w_tf, w_collider) in &low_walls {
                             let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
@@ -114,22 +114,30 @@ pub fn update_bullets(
                         }
 
                         if protected_by_wall {
-                            // Shot hits the wall instead of the crouched soldier!
+                            // Shot hits the wall instead of the ducked/prone soldier!
                             bullet_consumed = true;
                             break;
                         }
 
-                        // Crouched in the open: 50% chance the shot misses the reduced silhouette
+                        // Stance defense in the open:
+                        // Crouched: 50% chance the shot misses the reduced silhouette
+                        // Prone: 80% chance the shot misses the very low profile
+                        let miss_chance = match soldier.stance {
+                            Stance::Crouching => 50,
+                            Stance::Prone => 80,
+                            Stance::Standing => 0,
+                        };
+
                         let seed = (time.elapsed().as_millis() ^ (char_entity.to_bits() as u128)) as u64;
-                        let miss = (seed % 100) < 50;
+                        let miss = (seed % 100) < miss_chance;
                         if miss {
-                            // Shot missed the crouched soldier!
+                            // Shot missed the ducked/prone soldier!
                             bullet_consumed = true;
                             break;
                         }
                     }
 
-                    // Direct hit on character (standing or failed crouch roll)
+                    // Direct hit on character (standing or failed crouch/prone roll)
                     commands.entity(char_entity).despawn_children();
                     commands.entity(char_entity).despawn();
                     bullet_consumed = true;
