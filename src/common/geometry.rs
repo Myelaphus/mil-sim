@@ -96,6 +96,70 @@ pub fn resolve_circle_obstacle_collision(
     pos
 }
 
+// Resolves collision of a circle against another circle (pushes pos out to radius + other_radius)
+pub fn resolve_circle_circle_collision(
+    mut pos: Vec2,
+    radius: f32,
+    other_pos: Vec2,
+    other_radius: f32,
+) -> Vec2 {
+    let diff = pos - other_pos;
+    let dist_sq = diff.length_squared();
+    let min_dist = radius + other_radius;
+    if dist_sq < min_dist * min_dist {
+        if dist_sq > 0.00001 {
+            let dist = dist_sq.sqrt();
+            let overlap = min_dist - dist;
+            pos += (diff / dist) * overlap;
+        } else {
+            pos.x += min_dist;
+        }
+    }
+    pos
+}
+
+// Pairwise collision resolution system ensuring soldiers cannot occupy the same point in space
+pub fn resolve_soldier_pairwise_collisions(
+    mut soldiers_q: Query<(Entity, &mut Transform), With<crate::common::types::Soldier>>,
+    buildings_q: Query<(&Transform, &BuildingCollider), (With<crate::world::buildings::Building>, Without<crate::common::types::Soldier>)>,
+    low_walls_q: Query<(&Transform, &LowWallCollider), (With<crate::world::buildings::LowWall>, Without<crate::common::types::Soldier>)>,
+) {
+    let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+    let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
+    let soldier_radius = 0.6;
+    let min_dist = soldier_radius * 2.0;
+    let min_dist_sq = min_dist * min_dist;
+
+    for _ in 0..2 {
+        let mut combinations = soldiers_q.iter_combinations_mut();
+        while let Some([(_e1, mut tf1), (_e2, mut tf2)]) = combinations.fetch_next() {
+            let p1 = Vec2::new(tf1.translation.x, tf1.translation.z);
+            let p2 = Vec2::new(tf2.translation.x, tf2.translation.z);
+            let diff = p1 - p2;
+            let dist_sq = diff.length_squared();
+
+            if dist_sq < min_dist_sq {
+                let (push1, push2) = if dist_sq > 0.00001 {
+                    let dist = dist_sq.sqrt();
+                    let overlap = min_dist - dist;
+                    let normal = diff / dist;
+                    (normal * (overlap * 0.5), -normal * (overlap * 0.5))
+                } else {
+                    (Vec2::new(soldier_radius, 0.0), Vec2::new(-soldier_radius, 0.0))
+                };
+
+                let new_p1 = resolve_circle_obstacle_collision(p1 + push1, soldier_radius, &buildings, &low_walls);
+                let new_p2 = resolve_circle_obstacle_collision(p2 + push2, soldier_radius, &buildings, &low_walls);
+
+                tf1.translation.x = new_p1.x;
+                tf1.translation.z = new_p1.y;
+                tf2.translation.x = new_p2.x;
+                tf2.translation.z = new_p2.y;
+            }
+        }
+    }
+}
+
 // Multi-pass circle vs building collision resolver (backward-compatible)
 #[allow(dead_code)]
 pub fn resolve_circle_building_collision(
@@ -402,6 +466,17 @@ mod tests {
         let pos = Vec2::new(0.0, 0.5);
         let resolved = resolve_circle_obstacle_collision(pos, 0.6, &[], &low_walls);
         assert!(resolved.y >= 1.0);
+    }
+
+    #[test]
+    fn test_circle_circle_collision() {
+        let pos_a = Vec2::new(0.0, 0.0);
+        let pos_b = Vec2::new(0.8, 0.0);
+        let radius = 0.6; // min separation is 1.2
+
+        let resolved_a = resolve_circle_circle_collision(pos_a, radius, pos_b, radius);
+        let dist = (resolved_a - pos_b).length();
+        assert!(dist >= 1.199);
     }
 }
 

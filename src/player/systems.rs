@@ -1,7 +1,9 @@
 use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
-use crate::common::geometry::resolve_circle_obstacle_collision;
+use crate::common::geometry::{
+    line_intersects_box, resolve_circle_circle_collision, resolve_circle_obstacle_collision,
+};
 use crate::common::types::{Soldier, Team};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
@@ -60,6 +62,7 @@ pub fn update_player(
     mut player_q: Query<(&mut Transform, &mut Soldier), With<Player>>,
     buildings_q: Query<(&Transform, &BuildingCollider), Without<Player>>,
     low_walls_q: Query<(&Transform, &LowWallCollider), Without<Player>>,
+    other_soldiers_q: Query<&Transform, (With<Soldier>, Without<Player>)>,
 ) {
     let Ok((mut soldier_tf, mut soldier)) = player_q.single_mut() else {
         return;
@@ -76,7 +79,7 @@ pub fn update_player(
         Vec3::ONE
     };
 
-    // 2. WASD / Arrow keys movement with obstacle collision
+    // 2. WASD / Arrow keys movement with obstacle & soldier collision
     let mut move_delta = Vec3::ZERO;
     if keyboard_input.pressed(KeyCode::KeyW) || keyboard_input.pressed(KeyCode::ArrowUp) {
         move_delta.z -= 1.0;
@@ -101,10 +104,16 @@ pub fn update_player(
         let delta = move_delta.normalize() * speed * time.delta_secs();
         let soldier_radius = 0.6;
 
-        let new_pos = Vec2::new(
+        let mut new_pos = Vec2::new(
             soldier_tf.translation.x + delta.x,
             soldier_tf.translation.z + delta.z,
         );
+
+        // Resolve collision against other soldiers (cannot occupy same space)
+        for other_tf in &other_soldiers_q {
+            let other_pos = Vec2::new(other_tf.translation.x, other_tf.translation.z);
+            new_pos = resolve_circle_circle_collision(new_pos, soldier_radius, other_pos, soldier_radius);
+        }
 
         let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
         let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
@@ -150,22 +159,43 @@ pub fn update_player(
 
     if should_shoot {
         soldier.shoot_cooldown.reset();
-        let spawn_pos = Vec2::new(soldier_tf.translation.x, soldier_tf.translation.z)
-            + soldier.facing_dir * 0.85;
+        let soldier_pos = Vec2::new(soldier_tf.translation.x, soldier_tf.translation.z);
+        let spawn_pos = soldier_pos + soldier.facing_dir * 0.85;
 
-        commands.spawn((
-            Mesh3d(bullet_assets.mesh.clone()),
-            MeshMaterial3d(bullet_assets.player_material.clone()),
-            Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
-                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-            Bullet {
-                origin: spawn_pos,
-                direction: soldier.facing_dir,
-                speed: 45.0,
-                lifetime: 1.5,
-                team: Team::Player,
-            },
-        ));
+        // When crouched, shots aimed directly into/across an adjacent low wall cannot pass through
+        let mut muzzle_blocked = false;
+        if soldier.is_crouched {
+            for (w_tf, w_collider) in &low_walls_q {
+                let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+                let w_min = w_center - w_collider.half_size;
+                let w_max = w_center + w_collider.half_size;
+
+                let aim_probe = spawn_pos + soldier.facing_dir * 0.5;
+                if line_intersects_box(soldier_pos, aim_probe, w_min, w_max)
+                    || (spawn_pos.x >= w_min.x && spawn_pos.x <= w_max.x && spawn_pos.y >= w_min.y && spawn_pos.y <= w_max.y)
+                {
+                    muzzle_blocked = true;
+                    break;
+                }
+            }
+        }
+
+        if !muzzle_blocked {
+            commands.spawn((
+                Mesh3d(bullet_assets.mesh.clone()),
+                MeshMaterial3d(bullet_assets.player_material.clone()),
+                Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
+                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                Bullet {
+                    origin: soldier_pos,
+                    direction: soldier.facing_dir,
+                    speed: 45.0,
+                    lifetime: 1.5,
+                    team: Team::Player,
+                    shooter_crouched: soldier.is_crouched,
+                },
+            ));
+        }
     }
 }
 

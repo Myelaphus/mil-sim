@@ -10,6 +10,7 @@ pub struct Bullet {
     pub speed: f32,
     pub lifetime: f32,
     pub team: Team,
+    pub shooter_crouched: bool,
 }
 
 #[derive(Resource)]
@@ -70,7 +71,27 @@ pub fn update_bullets(
             continue;
         }
 
-        // 2. Check hit on opposing team characters (Player / Enemy)
+        // 2. Check low wall collision: bullets fired while crouched cannot clear waist-height walls
+        if bullet.shooter_crouched {
+            let mut hit_low_wall = false;
+            for (w_tf, collider) in &low_walls {
+                let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+                if bullet_pos.x >= w_center.x - collider.half_size.x
+                    && bullet_pos.x <= w_center.x + collider.half_size.x
+                    && bullet_pos.y >= w_center.y - collider.half_size.y
+                    && bullet_pos.y <= w_center.y + collider.half_size.y
+                {
+                    hit_low_wall = true;
+                    break;
+                }
+            }
+            if hit_low_wall {
+                commands.entity(b_entity).despawn();
+                continue;
+            }
+        }
+
+        // 3. Check hit on opposing team characters (Player / Enemy)
         let mut bullet_consumed = false;
         for (char_entity, char_tf, char_team, soldier) in &characters_q {
             if bullet.team != *char_team {

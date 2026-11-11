@@ -199,6 +199,12 @@ pub fn update_enemy(
                 enemy.shoot_timer.tick(time.delta());
                 if enemy.shoot_timer.is_finished() {
                     enemy.shoot_timer.reset();
+
+                    // If crouched behind a low wall, pop up to standing to shoot over the wall
+                    if near_low_wall {
+                        soldier.is_crouched = false;
+                    }
+
                     let spawn_pos =
                         Vec2::new(tf.translation.x, tf.translation.z) + soldier.facing_dir * 0.85;
 
@@ -213,6 +219,7 @@ pub fn update_enemy(
                             speed: 38.0,
                             lifetime: 1.6,
                             team: Team::Enemy,
+                            shooter_crouched: soldier.is_crouched,
                         },
                     ));
                 }

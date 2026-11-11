@@ -3,13 +3,16 @@ mod common;
 mod enemy;
 mod fog;
 mod player;
+mod ui;
 mod world;
 
 use bevy::prelude::*;
 use combat::CombatPlugin;
+use common::geometry::resolve_soldier_pairwise_collisions;
 use enemy::EnemyPlugin;
 use fog::FogPlugin;
 use player::PlayerPlugin;
+use ui::UiPlugin;
 use world::WorldPlugin;
 
 fn main() {
@@ -28,7 +31,14 @@ fn main() {
             CombatPlugin,
             PlayerPlugin,
             EnemyPlugin,
+            UiPlugin,
         ))
+        .add_systems(
+            Update,
+            resolve_soldier_pairwise_collisions
+                .after(player::update_player)
+                .after(enemy::update_enemy),
+        )
         .run();
 }
 
@@ -63,6 +73,8 @@ mod tests {
                 enemy::update_enemy,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
+                resolve_soldier_pairwise_collisions,
+                ui::update_fps,
             ),
         );
         app.update();
