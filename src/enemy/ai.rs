@@ -8,14 +8,14 @@ pub enum EnemyAiState {
 }
 
 pub const ENEMY_WAYPOINTS: [Vec2; 8] = [
-    Vec2::new(-20.0, -18.0), // Northwest outer corner
-    Vec2::new(-20.0, 0.0),   // West outer road
-    Vec2::new(0.0, 0.0),     // Central courtyard
-    Vec2::new(0.0, 16.0),    // South courtyard approach
-    Vec2::new(17.0, 16.0),   // Southeast outer road
-    Vec2::new(17.0, 0.0),    // East outer road
-    Vec2::new(0.0, 0.0),     // Central courtyard
-    Vec2::new(0.0, -18.0),   // North post
+    Vec2::new(-35.0, -25.0), // 0: Northwest Avenue (unobstructed road west of North HQ)
+    Vec2::new(0.0, -25.0),   // 1: North Central Plaza intersection
+    Vec2::new(35.0, -25.0),  // 2: Northeast Avenue (unobstructed road east of Radar Bunker)
+    Vec2::new(35.0, 5.0),    // 3: East Logistics Road (unobstructed road east of Warehouse)
+    Vec2::new(35.0, 32.0),   // 4: Southeast Armory Road
+    Vec2::new(0.0, 32.0),    // 5: South Checkpoint Gate
+    Vec2::new(-35.0, 32.0),  // 6: Southwest Motor Pool Road
+    Vec2::new(-35.0, 5.0),   // 7: West Barracks Road (unobstructed road west of Barracks)
 ];
 
 #[derive(Component)]
@@ -29,5 +29,7 @@ pub struct Enemy {
     pub vision_range: f32,
     pub vision_half_angle: f32,
     pub inner_radius: f32,
+    pub stuck_timer: f32,
+    pub last_pos: Vec2,
 }
 

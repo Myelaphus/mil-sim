@@ -57,7 +57,7 @@ mod tests {
         app.init_resource::<Time>();
         app.init_resource::<ButtonInput<KeyCode>>();
         let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
-        let bullet_mesh = meshes.add(Circle::new(0.14));
+        let bullet_mesh = meshes.add(Circle::new(common::types::BULLET_RADIUS));
         let blood_pool_mesh = meshes.add(Circle::new(0.85));
         let blood_splatter_mesh = meshes.add(Circle::new(0.22));
         let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
@@ -85,6 +85,7 @@ mod tests {
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
                 resolve_soldier_pairwise_collisions,
+                world::update_camera,
                 ui::update_fps,
             ),
         );

@@ -4,7 +4,7 @@ use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     line_intersects_box, resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{Soldier, Stance, Team};
+use crate::common::types::{Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 #[derive(Component)]
@@ -16,7 +16,7 @@ pub fn setup_player(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let pointer_mesh = meshes.add(Circle::new(0.15));
-    let player_soldier_mesh = meshes.add(Circle::new(0.6));
+    let player_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
     let player_soldier_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.15, 0.50, 0.95),
         perceptual_roughness: 0.5,
@@ -32,7 +32,7 @@ pub fn setup_player(
         .spawn((
             Mesh3d(player_soldier_mesh),
             MeshMaterial3d(player_soldier_material),
-            Transform::from_xyz(0.0, 0.05, 20.0)
+            Transform::from_xyz(0.0, 0.05, 48.0)
                 .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             Player,
             Team::Player,
@@ -113,7 +113,7 @@ pub fn update_player(
             Stance::Prone => base_speed * 0.23,     // Very slow crawling speed
         };
         let delta = move_delta.normalize() * speed * time.delta_secs();
-        let soldier_radius = 0.6;
+        let soldier_radius = SOLDIER_RADIUS;
 
         let mut new_pos = Vec2::new(
             soldier_tf.translation.x + delta.x,

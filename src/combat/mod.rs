@@ -2,6 +2,7 @@ pub mod bullet;
 
 use bevy::prelude::*;
 pub use bullet::*;
+use crate::common::types::BULLET_RADIUS;
 
 pub struct CombatPlugin;
 
@@ -17,7 +18,7 @@ fn setup_bullet_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let bullet_mesh = meshes.add(Circle::new(0.14));
+    let bullet_mesh = meshes.add(Circle::new(BULLET_RADIUS));
     let player_bullet_material = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.85, 0.2),
         unlit: true,

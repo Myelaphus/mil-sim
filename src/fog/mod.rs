@@ -3,6 +3,7 @@ pub mod mesh;
 
 use bevy::prelude::*;
 pub use material::*;
+use crate::common::types::WORLD_SIZE;
 use crate::world::buildings::COMPOUND_BUILDINGS;
 
 pub struct FogPlugin;
@@ -33,11 +34,11 @@ fn setup_fog(
     }
 
     let fog_material = fog_materials.add(FogMaterial {
-        soldier_pos: Vec2::new(0.0, 20.0),
+        soldier_pos: Vec2::new(0.0, 48.0),
         soldier_dir: Vec2::new(0.0, -1.0),
-        vision_range: 26.0,
+        vision_range: 36.0,
         vision_angle: 45.0_f32.to_radians(), // 90° vision cone (+/- 45°)
-        inner_radius: 2.5,                   // Close-range personal awareness circle
+        inner_radius: 3.0,                   // Close-range personal awareness circle
         fog_alpha: 0.82,                     // Dark/greyed-out opacity outside vision cone
         building_count: COMPOUND_BUILDINGS.len() as u32,
         _pad0: 0.0,
@@ -47,7 +48,7 @@ fn setup_fog(
     });
 
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(120.0, 120.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(WORLD_SIZE * 2.0, WORLD_SIZE * 2.0))),
         MeshMaterial3d(fog_material),
         Transform::from_xyz(0.0, 4.0, 0.0),
         FogOverlay,

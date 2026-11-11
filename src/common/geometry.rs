@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use crate::common::types::{SOLDIER_RADIUS, SOLDIER_WORLD_BOUND};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 // Multi-pass circle vs obstacle (buildings + low walls) collision resolver with smooth sliding
@@ -91,8 +92,9 @@ pub fn resolve_circle_obstacle_collision(
             }
         }
     }
-    pos.x = pos.x.clamp(-28.0, 28.0);
-    pos.y = pos.y.clamp(-28.0, 28.0);
+    // World boundary collision check derived from unified world dimensions
+    pos.x = pos.x.clamp(-SOLDIER_WORLD_BOUND, SOLDIER_WORLD_BOUND);
+    pos.y = pos.y.clamp(-SOLDIER_WORLD_BOUND, SOLDIER_WORLD_BOUND);
     pos
 }
 
@@ -126,7 +128,7 @@ pub fn resolve_soldier_pairwise_collisions(
 ) {
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
-    let soldier_radius = 0.6;
+    let soldier_radius = SOLDIER_RADIUS;
     let min_dist = soldier_radius * 2.0;
     let min_dist_sq = min_dist * min_dist;
 
@@ -320,12 +322,12 @@ pub fn find_avoidance_direction(
     }
     let desired_norm = desired_dir.normalize();
 
-    // If direct direction is clear, proceed directly
+    // 1. If direct direction is clear, proceed directly
     if !is_path_blocked(origin, desired_norm, 1.8, buildings, low_walls, soldier_radius) {
         return desired_norm;
     }
 
-    // Branch alternate steering angles (left/right up to ~150 degrees)
+    // 2. Test alternate steering angles with standard probe distance (1.8m)
     const ANGLES: [f32; 10] = [
         0.52, -0.52, // ~30 deg
         1.05, -1.05, // ~60 deg
@@ -343,6 +345,62 @@ pub fn find_avoidance_direction(
         );
         if !is_path_blocked(origin, cand, 1.8, buildings, low_walls, soldier_radius) {
             return cand;
+        }
+    }
+
+    // 3. Shorter probe fallback (0.9m) to allow navigating around tight corners and alleys
+    for angle in ANGLES {
+        let cos = angle.cos();
+        let sin = angle.sin();
+        let cand = Vec2::new(
+            desired_norm.x * cos - desired_norm.y * sin,
+            desired_norm.x * sin + desired_norm.y * cos,
+        );
+        if !is_path_blocked(origin, cand, 0.9, buildings, low_walls, soldier_radius) {
+            return cand;
+        }
+    }
+
+    // 4. Wall-sliding projection: calculate surface tangent from the nearest obstacle
+    let mut closest_normal = Vec2::ZERO;
+    let mut min_dist_sq = f32::MAX;
+    for (b_tf, collider) in buildings {
+        let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+        let closest = Vec2::new(
+            origin.x.clamp(b_center.x - collider.half_size.x, b_center.x + collider.half_size.x),
+            origin.y.clamp(b_center.y - collider.half_size.y, b_center.y + collider.half_size.y),
+        );
+        let diff = origin - closest;
+        let d2 = diff.length_squared();
+        if d2 < min_dist_sq && d2 < (soldier_radius * 2.2) * (soldier_radius * 2.2) {
+            min_dist_sq = d2;
+            if d2 > 0.0001 {
+                closest_normal = diff.normalize();
+            }
+        }
+    }
+    for (w_tf, collider) in low_walls {
+        let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+        let closest = Vec2::new(
+            origin.x.clamp(w_center.x - collider.half_size.x, w_center.x + collider.half_size.x),
+            origin.y.clamp(w_center.y - collider.half_size.y, w_center.y + collider.half_size.y),
+        );
+        let diff = origin - closest;
+        let d2 = diff.length_squared();
+        if d2 < min_dist_sq && d2 < (soldier_radius * 2.2) * (soldier_radius * 2.2) {
+            min_dist_sq = d2;
+            if d2 > 0.0001 {
+                closest_normal = diff.normalize();
+            }
+        }
+    }
+
+    if closest_normal.length_squared() > 0.5 {
+        let t1 = Vec2::new(-closest_normal.y, closest_normal.x);
+        let t2 = Vec2::new(closest_normal.y, -closest_normal.x);
+        let slide = if desired_norm.dot(t1) >= desired_norm.dot(t2) { t1 } else { t2 };
+        if !is_path_blocked(origin, slide, 0.6, buildings, low_walls, soldier_radius) {
+            return slide;
         }
     }
 
@@ -455,6 +513,25 @@ mod tests {
     }
 
     #[test]
+    fn test_wall_sliding_tangent_avoids_getting_stuck() {
+        // Soldier flush against the west face of a building (at x = -4.6, half_size = 4.0)
+        let dummy_tf = Transform::from_xyz(0.0, 0.0, 0.0);
+        let dummy_collider = BuildingCollider {
+            half_size: Vec2::new(4.0, 10.0),
+        };
+        let buildings = [(&dummy_tf, &dummy_collider)];
+
+        let origin = Vec2::new(-4.55, 0.0);
+        // Desired direction points straight east into the solid building
+        let desired = Vec2::new(1.0, 0.0);
+        let steered = find_avoidance_direction(origin, desired, &buildings, &[], 0.6);
+
+        // Steering must find a non-zero sliding direction parallel to the wall
+        assert!(steered.y.abs() > 0.5);
+        assert!(!is_path_blocked(origin, steered, 0.6, &buildings, &[], 0.6));
+    }
+
+    #[test]
     fn test_low_wall_collision() {
         let wall_tf = Transform::from_xyz(0.0, 0.0, 0.0);
         let wall_collider = LowWallCollider {
@@ -477,6 +554,20 @@ mod tests {
         let resolved_a = resolve_circle_circle_collision(pos_a, radius, pos_b, radius);
         let dist = (resolved_a - pos_b).length();
         assert!(dist >= 1.199);
+    }
+
+    #[test]
+    fn test_world_border_collision() {
+        // Position at South gate (y = 48.0) in the expanded 120x120 world should NOT be clamped to 28.0
+        let pos = Vec2::new(0.0, 48.0);
+        let resolved = resolve_circle_obstacle_collision(pos, SOLDIER_RADIUS, &[], &[]);
+        assert_eq!(resolved.y, 48.0);
+
+        // Position exceeding world bounds should be clamped to derived SOLDIER_WORLD_BOUND
+        let out_of_bounds = Vec2::new(75.0, -80.0);
+        let resolved_oob = resolve_circle_obstacle_collision(out_of_bounds, SOLDIER_RADIUS, &[], &[]);
+        assert_eq!(resolved_oob.x, SOLDIER_WORLD_BOUND);
+        assert_eq!(resolved_oob.y, -SOLDIER_WORLD_BOUND);
     }
 }
 

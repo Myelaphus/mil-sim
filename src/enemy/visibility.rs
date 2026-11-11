@@ -32,9 +32,9 @@ pub fn update_enemy_visibility(
             player_pos,
             player_soldier.facing_dir,
             enemy_pos,
-            26.0,
+            36.0,
             45.0_f32.to_radians(),
-            2.5,
+            3.0,
             &buildings,
         );
 

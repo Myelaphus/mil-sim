@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision};
-use crate::common::types::{Soldier, Stance, Team};
+use crate::common::types::{Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::enemy::ai::{Enemy, EnemyAiState, ENEMY_WAYPOINTS};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
@@ -14,7 +14,7 @@ pub fn setup_enemy(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let pointer_mesh = meshes.add(Circle::new(0.15));
-    let enemy_soldier_mesh = meshes.add(Circle::new(0.6));
+    let enemy_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
     let enemy_soldier_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.90, 0.15, 0.15),
         perceptual_roughness: 0.5,
@@ -26,8 +26,8 @@ pub fn setup_enemy(
         ..default()
     });
 
-    // Enemy vision cone mesh & material (90° cone, 16 units range)
-    let enemy_cone_mesh = meshes.add(create_vision_cone_mesh(16.0, FRAC_PI_2, 16));
+    // Enemy vision cone mesh & material (90° cone, 24 units range)
+    let enemy_cone_mesh = meshes.add(create_vision_cone_mesh(24.0, FRAC_PI_2, 16));
     let enemy_cone_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.95, 0.2, 0.2, 0.18),
         alpha_mode: AlphaMode::Blend,
@@ -38,16 +38,16 @@ pub fn setup_enemy(
 
     // Spawn 5 enemy soldiers with distributed compound patrol assignments
     let enemy_configs = [
-        // 1. North Perimeter Guard
-        (Vec2::new(0.0, -18.0), Vec2::new(-1.0, 0.0), 0),
-        // 2. Northwest Road Guard
-        (Vec2::new(-20.0, -8.0), Vec2::new(0.0, 1.0), 1),
-        // 3. Central Plaza Sentry
-        (Vec2::new(0.0, -6.0), Vec2::new(0.0, 1.0), 2),
-        // 4. Northeast Depot Guard
-        (Vec2::new(17.0, -10.0), Vec2::new(0.0, -1.0), 7),
-        // 5. East Flank Guard
-        (Vec2::new(17.0, 8.0), Vec2::new(0.0, 1.0), 4),
+        // 1. North Central Guard (on North Central Avenue)
+        (Vec2::new(0.0, -25.0), Vec2::new(0.0, 1.0), 1),
+        // 2. Northwest Road Guard (on Northwest Avenue west of HQ)
+        (Vec2::new(-35.0, -20.0), Vec2::new(0.0, -1.0), 0),
+        // 3. Northeast Radar Guard (on Northeast Avenue)
+        (Vec2::new(35.0, -20.0), Vec2::new(0.0, 1.0), 2),
+        // 4. Southeast Armory Guard (on Southeast Avenue)
+        (Vec2::new(35.0, 20.0), Vec2::new(0.0, 1.0), 4),
+        // 5. Southwest Motor Pool Guard (on Southwest Avenue)
+        (Vec2::new(-35.0, 20.0), Vec2::new(0.0, -1.0), 6),
     ];
 
     for (pos, facing, start_wp_idx) in enemy_configs {
@@ -66,9 +66,11 @@ pub fn setup_enemy(
                     investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
                     shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                     speed: 5.5,
-                    vision_range: 16.0,
+                    vision_range: 24.0,
                     vision_half_angle: 45.0_f32.to_radians(),
                     inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: pos,
                 },
                 Team::Enemy,
                 Soldier {
@@ -114,7 +116,7 @@ pub fn update_enemy(
     bullet_assets: Res<BulletAssets>,
 ) {
     let dt = time.delta_secs();
-    let soldier_radius = 0.6;
+    let soldier_radius = SOLDIER_RADIUS;
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
     let player_pos = player_q
@@ -287,9 +289,21 @@ pub fn update_enemy(
                 let to_wp = target_wp - enemy_pos;
                 let dist = to_wp.length();
 
-                if dist < 1.2 {
+                // Stuck watchdog: track displacement to ensure AI never remains pinned against obstacles
+                let moved_dist = (enemy_pos - enemy.last_pos).length();
+                if moved_dist < 0.25 * dt * enemy.speed {
+                    enemy.stuck_timer += dt;
+                } else {
+                    enemy.stuck_timer = 0.0;
+                    enemy.last_pos = enemy_pos;
+                }
+
+                // If reached waypoint OR stuck for > 1.5 seconds, advance to the next patrol waypoint
+                if dist < 1.6 || enemy.stuck_timer > 1.5 {
                     enemy.current_waypoint_idx =
                         (enemy.current_waypoint_idx + 1) % ENEMY_WAYPOINTS.len();
+                    enemy.stuck_timer = 0.0;
+                    enemy.last_pos = enemy_pos;
                 } else {
                     let desired_move = to_wp / dist;
                     let move_dir = find_avoidance_direction(

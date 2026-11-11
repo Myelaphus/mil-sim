@@ -1,7 +1,9 @@
 use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::common::geometry::line_intersects_box;
-use crate::common::types::{BloodDecal, Corpse, Soldier, Stance, Team};
+use crate::common::types::{
+    BloodDecal, Corpse, Soldier, Stance, Team, BULLET_RADIUS, SOLDIER_RADIUS, WORLD_HALF_SIZE,
+};
 use crate::enemy::ai::Enemy;
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
@@ -44,8 +46,8 @@ pub fn update_bullets(
     characters_q: Query<(Entity, &Transform, &Team, &Soldier), Without<Bullet>>,
 ) {
     let dt = time.delta_secs();
-    let soldier_radius = 0.6;
-    let bullet_radius = 0.14;
+    let soldier_radius = SOLDIER_RADIUS;
+    let bullet_radius = BULLET_RADIUS;
     let hit_dist_sq = (soldier_radius + bullet_radius) * (soldier_radius + bullet_radius);
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
 
@@ -59,8 +61,8 @@ pub fn update_bullets(
         tf.translation.x += bullet.direction.x * bullet.speed * dt;
         tf.translation.z += bullet.direction.y * bullet.speed * dt;
 
-        // Map boundaries check
-        if tf.translation.x.abs() > 30.0 || tf.translation.z.abs() > 30.0 {
+        // Map boundaries check derived directly from unified world dimensions
+        if tf.translation.x.abs() > WORLD_HALF_SIZE || tf.translation.z.abs() > WORLD_HALF_SIZE {
             commands.entity(b_entity).despawn();
             continue;
         }
@@ -260,6 +262,8 @@ mod tests {
                     vision_range: 16.0,
                     vision_half_angle: 0.78,
                     inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::new(0.0, 5.0),
                 },
                 Team::Enemy,
                 Soldier {
@@ -353,6 +357,8 @@ mod tests {
                     vision_range: 16.0,
                     vision_half_angle: 0.78,
                     inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::new(0.0, 5.0),
                 },
                 Team::Enemy,
                 Soldier {

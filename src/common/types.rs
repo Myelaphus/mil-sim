@@ -1,5 +1,15 @@
 use bevy::prelude::*;
 
+// World dimensions and derived boundary constants (Single source of truth)
+pub const WORLD_SIZE: f32 = 120.0;
+pub const WORLD_HALF_SIZE: f32 = WORLD_SIZE * 0.5;
+
+pub const SOLDIER_RADIUS: f32 = 0.6;
+pub const BULLET_RADIUS: f32 = 0.14;
+
+// Soldier movement clamp margin: derived directly from world dimensions and soldier physical radius
+pub const SOLDIER_WORLD_BOUND: f32 = WORLD_HALF_SIZE - (SOLDIER_RADIUS * 2.5);
+
 #[derive(Component, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Team {
     Player,
