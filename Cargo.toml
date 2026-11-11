@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 bevy = "0.19.1"
 
+[dev-dependencies]
+naga = { version = "29.0.4", features = ["wgsl-in"] }
+
 [features]
 dynamic_linking = ["bevy/dynamic_linking"]
 
