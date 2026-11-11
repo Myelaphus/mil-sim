@@ -1,13 +1,15 @@
 use bevy::prelude::*;
-use crate::world::buildings::BuildingCollider;
+use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
-// Multi-pass circle vs AABB collision resolver with smooth sliding
-pub fn resolve_circle_building_collision(
+// Multi-pass circle vs obstacle (buildings + low walls) collision resolver with smooth sliding
+pub fn resolve_circle_obstacle_collision(
     mut pos: Vec2,
     radius: f32,
     buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
 ) -> Vec2 {
     for _ in 0..4 {
+        // 1. Resolve collision against buildings
         for (b_tf, collider) in buildings {
             let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
             let closest = Vec2::new(
@@ -47,10 +49,61 @@ pub fn resolve_circle_building_collision(
                 }
             }
         }
+
+        // 2. Resolve collision against low walls
+        for (w_tf, collider) in low_walls {
+            let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+            let closest = Vec2::new(
+                pos.x.clamp(
+                    w_center.x - collider.half_size.x,
+                    w_center.x + collider.half_size.x,
+                ),
+                pos.y.clamp(
+                    w_center.y - collider.half_size.y,
+                    w_center.y + collider.half_size.y,
+                ),
+            );
+
+            let diff = pos - closest;
+            let dist_sq = diff.length_squared();
+
+            if dist_sq < radius * radius {
+                if dist_sq > 0.00001 {
+                    let dist = dist_sq.sqrt();
+                    let overlap = radius - dist;
+                    pos += (diff / dist) * overlap;
+                } else {
+                    let d_left = (pos.x - (w_center.x - collider.half_size.x)).abs();
+                    let d_right = ((w_center.x + collider.half_size.x) - pos.x).abs();
+                    let d_top = (pos.y - (w_center.y - collider.half_size.y)).abs();
+                    let d_bottom = ((w_center.y + collider.half_size.y) - pos.y).abs();
+                    let min_d = d_left.min(d_right).min(d_top).min(d_bottom);
+                    if min_d == d_left {
+                        pos.x = w_center.x - collider.half_size.x - radius;
+                    } else if min_d == d_right {
+                        pos.x = w_center.x + collider.half_size.x + radius;
+                    } else if min_d == d_top {
+                        pos.y = w_center.y - collider.half_size.y - radius;
+                    } else {
+                        pos.y = w_center.y + collider.half_size.y + radius;
+                    }
+                }
+            }
+        }
     }
     pos.x = pos.x.clamp(-28.0, 28.0);
     pos.y = pos.y.clamp(-28.0, 28.0);
     pos
+}
+
+// Multi-pass circle vs building collision resolver (backward-compatible)
+#[allow(dead_code)]
+pub fn resolve_circle_building_collision(
+    pos: Vec2,
+    radius: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+) -> Vec2 {
+    resolve_circle_obstacle_collision(pos, radius, buildings, &[])
 }
 
 pub fn can_see_target(
@@ -141,12 +194,13 @@ pub fn line_intersects_box(origin: Vec2, target: Vec2, b_min: Vec2, b_max: Vec2)
     tmin < 0.999 && tmax > 0.001
 }
 
-// Checks if moving from `origin` in `dir` by `probe_dist` penetrates any building obstacle
+// Checks if moving from `origin` in `dir` by `probe_dist` penetrates any building or low wall obstacle
 pub fn is_path_blocked(
     origin: Vec2,
     dir: Vec2,
     probe_dist: f32,
     buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
     soldier_radius: f32,
 ) -> bool {
     let check_radius = soldier_radius * 0.92;
@@ -169,6 +223,22 @@ pub fn is_path_blocked(
                 return true;
             }
         }
+        for (w_tf, collider) in low_walls {
+            let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+            let closest = Vec2::new(
+                probe.x.clamp(
+                    w_center.x - collider.half_size.x,
+                    w_center.x + collider.half_size.x,
+                ),
+                probe.y.clamp(
+                    w_center.y - collider.half_size.y,
+                    w_center.y + collider.half_size.y,
+                ),
+            );
+            if (probe - closest).length_squared() < check_radius * check_radius {
+                return true;
+            }
+        }
     }
     false
 }
@@ -178,6 +248,7 @@ pub fn find_avoidance_direction(
     origin: Vec2,
     desired_dir: Vec2,
     buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
     soldier_radius: f32,
 ) -> Vec2 {
     if desired_dir.length_squared() < 0.001 {
@@ -186,7 +257,7 @@ pub fn find_avoidance_direction(
     let desired_norm = desired_dir.normalize();
 
     // If direct direction is clear, proceed directly
-    if !is_path_blocked(origin, desired_norm, 1.8, buildings, soldier_radius) {
+    if !is_path_blocked(origin, desired_norm, 1.8, buildings, low_walls, soldier_radius) {
         return desired_norm;
     }
 
@@ -206,7 +277,7 @@ pub fn find_avoidance_direction(
             desired_norm.x * cos - desired_norm.y * sin,
             desired_norm.x * sin + desired_norm.y * cos,
         );
-        if !is_path_blocked(origin, cand, 1.8, buildings, soldier_radius) {
+        if !is_path_blocked(origin, cand, 1.8, buildings, low_walls, soldier_radius) {
             return cand;
         }
     }
@@ -313,10 +384,24 @@ mod tests {
 
         let origin = Vec2::new(0.0, -4.6);
         let desired = Vec2::new(0.0, 1.0);
-        let steered = find_avoidance_direction(origin, desired, &buildings, 0.6);
+        let steered = find_avoidance_direction(origin, desired, &buildings, &[], 0.6);
 
         assert!(steered.x.abs() > 0.4);
-        assert!(!is_path_blocked(origin, steered, 1.5, &buildings, 0.6));
+        assert!(!is_path_blocked(origin, steered, 1.5, &buildings, &[], 0.6));
+    }
+
+    #[test]
+    fn test_low_wall_collision() {
+        let wall_tf = Transform::from_xyz(0.0, 0.0, 0.0);
+        let wall_collider = LowWallCollider {
+            half_size: Vec2::new(2.0, 0.4),
+        };
+        let low_walls = [(&wall_tf, &wall_collider)];
+
+        // Soldier trying to walk into south face of low wall
+        let pos = Vec2::new(0.0, 0.5);
+        let resolved = resolve_circle_obstacle_collision(pos, 0.6, &[], &low_walls);
+        assert!(resolved.y >= 1.0);
     }
 }
 

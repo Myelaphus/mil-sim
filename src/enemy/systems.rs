@@ -1,12 +1,12 @@
 use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
-use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_building_collision};
+use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision};
 use crate::common::types::{Soldier, Team};
 use crate::enemy::ai::{Enemy, EnemyAiState, ENEMY_WAYPOINTS};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
-use crate::world::buildings::BuildingCollider;
+use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
 
 pub fn setup_enemy(
     mut commands: Commands,
@@ -74,6 +74,7 @@ pub fn setup_enemy(
                 Soldier {
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    is_crouched: false,
                 },
             ))
             .id();
@@ -96,7 +97,7 @@ pub fn setup_enemy(
     }
 }
 
-// Enemy AI: patrols compound, hunts player when spotted in vision cone, and shoots
+// Enemy AI: patrols compound, hunts player when spotted in vision cone, takes cover & shoots
 pub fn update_enemy(
     mut commands: Commands,
     time: Res<Time>,
@@ -104,13 +105,18 @@ pub fn update_enemy(
     player_q: Query<&Transform, (With<Player>, Without<Enemy>)>,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
-        (With<crate::world::buildings::Building>, Without<Player>, Without<Enemy>),
+        (With<Building>, Without<Player>, Without<Enemy>),
+    >,
+    low_walls_q: Query<
+        (&Transform, &LowWallCollider),
+        (With<LowWall>, Without<Player>, Without<Enemy>),
     >,
     bullet_assets: Res<BulletAssets>,
 ) {
     let dt = time.delta_secs();
     let soldier_radius = 0.6;
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+    let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
     let player_pos = player_q
         .iter()
         .next()
@@ -160,20 +166,33 @@ pub fn update_enemy(
                     soldier.facing_dir = to_target / dist;
                 }
 
+                // Check proximity to any low wall for cover
+                let near_low_wall = low_walls.iter().any(|(w_tf, _)| {
+                    let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+                    (w_pos - enemy_pos).length() < 2.5
+                });
+
                 // Advance if player is beyond close firing range
                 if dist > 6.0 {
+                    soldier.is_crouched = false;
                     let desired_move = soldier.facing_dir;
                     let move_dir = find_avoidance_direction(
                         enemy_pos,
                         desired_move,
                         &buildings,
+                        &low_walls,
                         soldier_radius,
                     );
                     let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75) * dt;
                     let resolved =
-                        resolve_circle_building_collision(next_pos, soldier_radius, &buildings);
+                        resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
+                } else if near_low_wall || dist > 4.0 {
+                    // Duck down into crouch behind cover or to reduce target silhouette while firing
+                    soldier.is_crouched = true;
+                } else {
+                    soldier.is_crouched = false;
                 }
 
                 // Fire at player
@@ -189,6 +208,7 @@ pub fn update_enemy(
                         Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
                             .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                         Bullet {
+                            origin: spawn_pos,
                             direction: soldier.facing_dir,
                             speed: 38.0,
                             lifetime: 1.6,
@@ -203,22 +223,25 @@ pub fn update_enemy(
                     let dist = to_target.length();
 
                     if dist > 1.2 {
-                        // Move toward last known position with obstacle steering
+                        // Move toward last known position at full standing speed
+                        soldier.is_crouched = false;
                         let desired_move = to_target / dist;
                         let move_dir = find_avoidance_direction(
                             enemy_pos,
                             desired_move,
                             &buildings,
+                            &low_walls,
                             soldier_radius,
                         );
                         soldier.facing_dir = move_dir;
                         let next_pos = enemy_pos + move_dir * enemy.speed * dt;
                         let resolved =
-                            resolve_circle_building_collision(next_pos, soldier_radius, &buildings);
+                            resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
                         tf.translation.x = resolved.x;
                         tf.translation.z = resolved.y;
                     } else {
-                        // At last known position: look around and search
+                        // At last known position: crouch low, look around and search
+                        soldier.is_crouched = true;
                         enemy.investigate_timer.tick(time.delta());
                         let scan_angle = time.elapsed_secs() * 3.0;
                         soldier.facing_dir = Vec2::new(scan_angle.cos(), scan_angle.sin());
@@ -233,6 +256,8 @@ pub fn update_enemy(
                 }
             }
             EnemyAiState::Search => {
+                // Standing during routine perimeter patrol
+                soldier.is_crouched = false;
                 let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
                 let to_wp = target_wp - enemy_pos;
                 let dist = to_wp.length();
@@ -246,21 +271,27 @@ pub fn update_enemy(
                         enemy_pos,
                         desired_move,
                         &buildings,
+                        &low_walls,
                         soldier_radius,
                     );
                     soldier.facing_dir = move_dir;
                     let next_pos = enemy_pos + move_dir * enemy.speed * dt;
                     let resolved =
-                        resolve_circle_building_collision(next_pos, soldier_radius, &buildings);
+                        resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
                 }
             }
         }
 
-        // Apply visual rotation from facing direction
+        // Apply visual rotation from facing direction and scale down when crouching
         let yaw = f32::atan2(-soldier.facing_dir.x, -soldier.facing_dir.y);
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
+        tf.scale = if soldier.is_crouched {
+            Vec3::splat(0.72) // Compact profile indicating crouching posture
+        } else {
+            Vec3::ONE
+        };
     }
 }
 

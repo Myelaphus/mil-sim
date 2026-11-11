@@ -1,9 +1,9 @@
 use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
-use crate::common::geometry::resolve_circle_building_collision;
+use crate::common::geometry::resolve_circle_obstacle_collision;
 use crate::common::types::{Soldier, Team};
-use crate::world::buildings::BuildingCollider;
+use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 #[derive(Component)]
 pub struct Player;
@@ -37,6 +37,7 @@ pub fn setup_player(
             Soldier {
                 facing_dir: Vec2::new(0.0, -1.0), // Facing North (-Z)
                 shoot_cooldown: Timer::from_seconds(0.12, TimerMode::Once),
+                is_crouched: false,
             },
         ))
         .id();
@@ -58,12 +59,24 @@ pub fn update_player(
     bullet_assets: Res<BulletAssets>,
     mut player_q: Query<(&mut Transform, &mut Soldier), With<Player>>,
     buildings_q: Query<(&Transform, &BuildingCollider), Without<Player>>,
+    low_walls_q: Query<(&Transform, &LowWallCollider), Without<Player>>,
 ) {
     let Ok((mut soldier_tf, mut soldier)) = player_q.single_mut() else {
         return;
     };
 
-    // 1. WASD / Arrow keys movement with building collision
+    // 1. Crouch toggle (C button) & visual scale feedback
+    if keyboard_input.just_pressed(KeyCode::KeyC) {
+        soldier.is_crouched = !soldier.is_crouched;
+    }
+
+    soldier_tf.scale = if soldier.is_crouched {
+        Vec3::splat(0.72) // Compact profile indicating crouching posture
+    } else {
+        Vec3::ONE
+    };
+
+    // 2. WASD / Arrow keys movement with obstacle collision
     let mut move_delta = Vec3::ZERO;
     if keyboard_input.pressed(KeyCode::KeyW) || keyboard_input.pressed(KeyCode::ArrowUp) {
         move_delta.z -= 1.0;
@@ -79,7 +92,12 @@ pub fn update_player(
     }
 
     if move_delta.length_squared() > 0.0 {
-        let speed = 12.0;
+        let base_speed = 12.0;
+        let speed = if soldier.is_crouched {
+            base_speed * 0.55 // Slower tactical crouch-walking
+        } else {
+            base_speed
+        };
         let delta = move_delta.normalize() * speed * time.delta_secs();
         let soldier_radius = 0.6;
 
@@ -89,12 +107,14 @@ pub fn update_player(
         );
 
         let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
-        let resolved = resolve_circle_building_collision(new_pos, soldier_radius, &buildings);
+        let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
+        let resolved =
+            resolve_circle_obstacle_collision(new_pos, soldier_radius, &buildings, &low_walls);
         soldier_tf.translation.x = resolved.x;
         soldier_tf.translation.z = resolved.y;
     }
 
-    // 2. Mouse aim direction for vision cone & soldier orientation
+    // 3. Mouse aim direction for vision cone & soldier orientation
     let Ok(window) = windows.single() else {
         return;
     };
@@ -123,7 +143,7 @@ pub fn update_player(
         }
     }
 
-    // 3. Spacebar shooting (Player team)
+    // 4. Spacebar shooting (Player team)
     soldier.shoot_cooldown.tick(time.delta());
     let should_shoot = keyboard_input.just_pressed(KeyCode::Space)
         || (keyboard_input.pressed(KeyCode::Space) && soldier.shoot_cooldown.is_finished());
@@ -139,6 +159,7 @@ pub fn update_player(
             Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
                 .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             Bullet {
+                origin: spawn_pos,
                 direction: soldier.facing_dir,
                 speed: 45.0,
                 lifetime: 1.5,

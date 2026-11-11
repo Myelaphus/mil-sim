@@ -63,5 +63,25 @@ fn setup_world(
             },
         ));
     }
+
+    // Waist-high low wall material (sandbag / concrete barrier tan-grey)
+    let low_wall_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.68, 0.64, 0.52),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+
+    // Spawn waist-height low walls
+    for (size, position) in COMPOUND_LOW_WALLS {
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
+            MeshMaterial3d(low_wall_material.clone()),
+            Transform::from_translation(position),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(size.x * 0.5, size.z * 0.5),
+            },
+        ));
+    }
 }
 

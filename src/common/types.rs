@@ -10,5 +10,6 @@ pub enum Team {
 pub struct Soldier {
     pub facing_dir: Vec2,
     pub shoot_cooldown: Timer,
+    pub is_crouched: bool,
 }
 
