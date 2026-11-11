@@ -36,47 +36,64 @@ pub fn setup_enemy(
         ..default()
     });
 
-    let enemy = commands
-        .spawn((
-            Mesh3d(enemy_soldier_mesh),
-            MeshMaterial3d(enemy_soldier_material),
-            Transform::from_xyz(0.0, 0.05, -18.0)
-                .with_rotation(Quat::from_rotation_y(FRAC_PI_2) * Quat::from_rotation_x(-FRAC_PI_2)),
-            Visibility::Hidden,
-            Enemy {
-                state: EnemyAiState::Search,
-                current_waypoint_idx: 0,
-                last_known_player_pos: None,
-                investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
-                shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
-                speed: 5.5,
-                vision_range: 16.0,
-                vision_half_angle: 45.0_f32.to_radians(),
-                inner_radius: 2.0,
-            },
-            Team::Enemy,
-            Soldier {
-                facing_dir: Vec2::new(-1.0, 0.0),
-                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
-            },
-        ))
-        .id();
+    // Spawn 5 enemy soldiers with distributed compound patrol assignments
+    let enemy_configs = [
+        // 1. North Perimeter Guard
+        (Vec2::new(0.0, -18.0), Vec2::new(-1.0, 0.0), 0),
+        // 2. Northwest Road Guard
+        (Vec2::new(-20.0, -8.0), Vec2::new(0.0, 1.0), 1),
+        // 3. Central Plaza Sentry
+        (Vec2::new(0.0, -6.0), Vec2::new(0.0, 1.0), 2),
+        // 4. Northeast Depot Guard
+        (Vec2::new(17.0, -10.0), Vec2::new(0.0, -1.0), 7),
+        // 5. East Flank Guard
+        (Vec2::new(17.0, 8.0), Vec2::new(0.0, 1.0), 4),
+    ];
 
-    // Attach direction indicator to enemy
-    commands.spawn((
-        Mesh3d(pointer_mesh),
-        MeshMaterial3d(enemy_pointer_material),
-        Transform::from_xyz(0.0, 0.42, 0.01),
-        ChildOf(enemy),
-    ));
+    for (pos, facing, start_wp_idx) in enemy_configs {
+        let yaw = f32::atan2(-facing.x, -facing.y);
+        let enemy = commands
+            .spawn((
+                Mesh3d(enemy_soldier_mesh.clone()),
+                MeshMaterial3d(enemy_soldier_material.clone()),
+                Transform::from_xyz(pos.x, 0.05, pos.y)
+                    .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2)),
+                Visibility::Hidden,
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: start_wp_idx,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 16.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: facing,
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                },
+            ))
+            .id();
 
-    // Attach visible vision cone to enemy
-    commands.spawn((
-        Mesh3d(enemy_cone_mesh),
-        MeshMaterial3d(enemy_cone_material),
-        Transform::from_xyz(0.0, 0.0, 0.005),
-        ChildOf(enemy),
-    ));
+        // Attach direction indicator to enemy
+        commands.spawn((
+            Mesh3d(pointer_mesh.clone()),
+            MeshMaterial3d(enemy_pointer_material.clone()),
+            Transform::from_xyz(0.0, 0.42, 0.01),
+            ChildOf(enemy),
+        ));
+
+        // Attach visible vision cone to enemy
+        commands.spawn((
+            Mesh3d(enemy_cone_mesh.clone()),
+            MeshMaterial3d(enemy_cone_material.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.005),
+            ChildOf(enemy),
+        ));
+    }
 }
 
 // Enemy AI: patrols compound, hunts player when spotted in vision cone, and shoots
