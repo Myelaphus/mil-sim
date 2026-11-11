@@ -53,7 +53,7 @@ fn test_enemy_visibility_in_fog() {
     let inner_radius = 2.5;
 
     let north_point = Vec2::new(0.0, -10.0);
-    assert!(is_point_visible_to_player(
+    assert!(can_see_target(
         player_pos,
         player_dir,
         north_point,
@@ -64,7 +64,7 @@ fn test_enemy_visibility_in_fog() {
     ));
 
     let south_point = Vec2::new(0.0, 10.0);
-    assert!(!is_point_visible_to_player(
+    assert!(!can_see_target(
         player_pos,
         player_dir,
         south_point,
@@ -73,6 +73,94 @@ fn test_enemy_visibility_in_fog() {
         inner_radius,
         &[],
     ));
+}
+
+#[test]
+fn test_can_see_target_occlusion() {
+    let seer_pos = Vec2::new(0.0, -15.0);
+    let seer_dir = Vec2::new(0.0, 1.0); // Facing South (+Z)
+    let target_pos = Vec2::new(0.0, 15.0);
+
+    // Obstacle building between seer and target at (0, 0) with half-size (4, 4)
+    let dummy_tf = Transform::from_xyz(0.0, 0.0, 0.0);
+    let dummy_collider = BuildingCollider {
+        half_size: Vec2::new(4.0, 4.0),
+    };
+    let buildings = [(&dummy_tf, &dummy_collider)];
+
+    assert!(!can_see_target(
+        seer_pos,
+        seer_dir,
+        target_pos,
+        40.0,
+        45.0_f32.to_radians(),
+        2.0,
+        &buildings,
+    ));
+}
+
+#[test]
+fn test_resolve_circle_collision() {
+    let b_center = Vec2::new(0.0, 0.0);
+    let b_half_size = Vec2::new(5.0, 5.0);
+    let soldier_radius = 0.6;
+
+    // Soldier slightly penetrating north face
+    let pos = Vec2::new(0.0, -5.2);
+    let dummy_tf = Transform::from_xyz(b_center.x, 0.0, b_center.y);
+    let dummy_collider = BuildingCollider { half_size: b_half_size };
+    let buildings = [(&dummy_tf, &dummy_collider)];
+
+    let resolved = resolve_circle_building_collision(pos, soldier_radius, &buildings);
+    assert!(resolved.y <= -5.6);
+}
+
+#[test]
+fn test_obstacle_avoidance_steering() {
+    let dummy_tf = Transform::from_xyz(0.0, 0.0, 0.0);
+    let dummy_collider = BuildingCollider {
+        half_size: Vec2::new(4.0, 4.0),
+    };
+    let buildings = [(&dummy_tf, &dummy_collider)];
+
+    // Positioned right against the north face of the obstacle (-4.6), attempting to move directly South into it
+    let origin = Vec2::new(0.0, -4.6);
+    let desired = Vec2::new(0.0, 1.0);
+    let steered = find_avoidance_direction(origin, desired, &buildings, 0.6);
+
+    // Steered direction must divert horizontally to navigate around the obstacle
+    assert!(steered.x.abs() > 0.4);
+    assert!(!is_path_blocked(origin, steered, 1.5, &buildings, 0.6));
+}
+
+#[test]
+fn test_system_query_conflicts() {
+    let mut app = App::new();
+    app.init_resource::<Assets<Mesh>>();
+    app.init_resource::<Assets<StandardMaterial>>();
+    app.init_resource::<Assets<FogMaterial>>();
+    app.init_resource::<Time>();
+    app.init_resource::<ButtonInput<KeyCode>>();
+    let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+    let bullet_mesh = meshes.add(Circle::new(0.14));
+    let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+    let player_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+    let enemy_mat = materials.add(Color::srgb(1.0, 0.0, 0.0));
+    app.insert_resource(BulletAssets {
+        mesh: bullet_mesh,
+        player_material: player_mat,
+        enemy_material: enemy_mat,
+    });
+    app.add_systems(
+        Update,
+        (
+            update_soldier_and_fog,
+            update_enemy,
+            update_bullets,
+            update_enemy_visibility,
+        ),
+    );
+    app.update();
 }
 
 fn main() {
@@ -105,16 +193,38 @@ enum Team {
     Enemy,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum EnemyAiState {
+    Search,
+    Engage,
+    Investigate,
+}
+
+const ENEMY_WAYPOINTS: [Vec2; 8] = [
+    Vec2::new(-20.0, -18.0), // Northwest outer corner
+    Vec2::new(-20.0, 0.0),   // West outer road
+    Vec2::new(0.0, 0.0),     // Central courtyard
+    Vec2::new(0.0, 16.0),    // South courtyard approach
+    Vec2::new(17.0, 16.0),   // Southeast outer road
+    Vec2::new(17.0, 0.0),    // East outer road
+    Vec2::new(0.0, 0.0),     // Central courtyard
+    Vec2::new(0.0, -18.0),   // North post
+];
+
 #[derive(Component)]
 struct Player;
 
 #[derive(Component)]
 struct Enemy {
-    patrol_min_x: f32,
-    patrol_max_x: f32,
-    speed: f32,
-    dir: f32,
+    state: EnemyAiState,
+    current_waypoint_idx: usize,
+    last_known_player_pos: Option<Vec2>,
+    investigate_timer: Timer,
     shoot_timer: Timer,
+    speed: f32,
+    vision_range: f32,
+    vision_half_angle: f32,
+    inner_radius: f32,
 }
 
 #[derive(Component)]
@@ -320,7 +430,7 @@ fn setup(
         .spawn((
             Mesh3d(player_soldier_mesh),
             MeshMaterial3d(player_soldier_material),
-            Transform::from_xyz(0.0, 0.05, 0.0)
+            Transform::from_xyz(0.0, 0.05, 20.0)
                 .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             Player,
             Team::Player,
@@ -367,19 +477,23 @@ fn setup(
         .spawn((
             Mesh3d(enemy_soldier_mesh),
             MeshMaterial3d(enemy_soldier_material),
-            Transform::from_xyz(0.0, 0.05, -15.0)
-                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+            Transform::from_xyz(0.0, 0.05, -18.0)
+                .with_rotation(Quat::from_rotation_y(FRAC_PI_2) * Quat::from_rotation_x(-FRAC_PI_2)),
             Visibility::Hidden,
             Enemy {
-                patrol_min_x: -6.0,
-                patrol_max_x: 6.0,
-                speed: 4.5,
-                dir: 1.0,
-                shoot_timer: Timer::from_seconds(1.2, TimerMode::Repeating),
+                state: EnemyAiState::Search,
+                current_waypoint_idx: 0,
+                last_known_player_pos: None,
+                investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                speed: 5.5,
+                vision_range: 16.0,
+                vision_half_angle: 45.0_f32.to_radians(),
+                inner_radius: 2.0,
             },
             Team::Enemy,
             Soldier {
-                facing_dir: Vec2::new(1.0, 0.0),
+                facing_dir: Vec2::new(-1.0, 0.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
             },
         ))
@@ -417,7 +531,7 @@ fn setup(
     }
 
     let fog_material = fog_materials.add(FogMaterial {
-        soldier_pos: Vec2::ZERO,
+        soldier_pos: Vec2::new(0.0, 20.0),
         soldier_dir: Vec2::new(0.0, -1.0),
         vision_range: 26.0,
         vision_angle: 45.0_f32.to_radians(), // 90° vision cone (+/- 45°)
@@ -474,58 +588,15 @@ fn update_soldier_and_fog(
         let delta = move_delta.normalize() * speed * time.delta_secs();
         let soldier_radius = 0.6;
 
-        let mut new_pos = Vec2::new(
+        let new_pos = Vec2::new(
             soldier_tf.translation.x + delta.x,
             soldier_tf.translation.z + delta.z,
         );
 
-        // Resolve circle vs AABB collision against all buildings
-        for _ in 0..4 {
-            for (b_tf, collider) in &buildings_q {
-                let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
-                let closest = Vec2::new(
-                    new_pos.x.clamp(
-                        b_center.x - collider.half_size.x,
-                        b_center.x + collider.half_size.x,
-                    ),
-                    new_pos.y.clamp(
-                        b_center.y - collider.half_size.y,
-                        b_center.y + collider.half_size.y,
-                    ),
-                );
-
-                let diff = new_pos - closest;
-                let dist_sq = diff.length_squared();
-
-                if dist_sq < soldier_radius * soldier_radius {
-                    if dist_sq > 0.00001 {
-                        let dist = dist_sq.sqrt();
-                        let overlap = soldier_radius - dist;
-                        new_pos += (diff / dist) * overlap;
-                    } else {
-                        // Soldier center is inside the building: push out to the nearest face
-                        let d_left = (new_pos.x - (b_center.x - collider.half_size.x)).abs();
-                        let d_right = ((b_center.x + collider.half_size.x) - new_pos.x).abs();
-                        let d_top = (new_pos.y - (b_center.y - collider.half_size.y)).abs();
-                        let d_bottom = ((b_center.y + collider.half_size.y) - new_pos.y).abs();
-                        let min_d = d_left.min(d_right).min(d_top).min(d_bottom);
-                        if min_d == d_left {
-                            new_pos.x = b_center.x - collider.half_size.x - soldier_radius;
-                        } else if min_d == d_right {
-                            new_pos.x = b_center.x + collider.half_size.x + soldier_radius;
-                        } else if min_d == d_top {
-                            new_pos.y = b_center.y - collider.half_size.y - soldier_radius;
-                        } else {
-                            new_pos.y = b_center.y + collider.half_size.y + soldier_radius;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Keep soldier on the map
-        soldier_tf.translation.x = new_pos.x.clamp(-28.0, 28.0);
-        soldier_tf.translation.z = new_pos.y.clamp(-28.0, 28.0);
+        let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+        let resolved = resolve_circle_building_collision(new_pos, soldier_radius, &buildings);
+        soldier_tf.translation.x = resolved.x;
+        soldier_tf.translation.z = resolved.y;
     }
 
     // 2. Mouse aim direction for vision cone & soldier orientation
@@ -591,51 +662,171 @@ fn update_soldier_and_fog(
     }
 }
 
-// Enemy movement (patrol back and forth along X) and shooting mechanics
+// Enemy AI: patrols compound, hunts player when spotted in vision cone, and shoots
 fn update_enemy(
     mut commands: Commands,
     time: Res<Time>,
-    mut enemy_q: Query<(&mut Transform, &mut Enemy, &mut Soldier), With<Enemy>>,
+    mut enemy_q: Query<(&mut Transform, &mut Enemy, &mut Soldier), (With<Enemy>, Without<Player>)>,
+    player_q: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    buildings_q: Query<
+        (&Transform, &BuildingCollider),
+        (With<Building>, Without<Player>, Without<Enemy>),
+    >,
     bullet_assets: Res<BulletAssets>,
 ) {
     let dt = time.delta_secs();
+    let soldier_radius = 0.6;
+    let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+    let player_pos = player_q
+        .iter()
+        .next()
+        .map(|tf| Vec2::new(tf.translation.x, tf.translation.z));
+
     for (mut tf, mut enemy, mut soldier) in &mut enemy_q {
-        // 1. Move side-to-side along X
-        tf.translation.x += enemy.dir * enemy.speed * dt;
-        if tf.translation.x >= enemy.patrol_max_x {
-            tf.translation.x = enemy.patrol_max_x;
-            enemy.dir = -1.0;
-        } else if tf.translation.x <= enemy.patrol_min_x {
-            tf.translation.x = enemy.patrol_min_x;
-            enemy.dir = 1.0;
+        let enemy_pos = Vec2::new(tf.translation.x, tf.translation.z);
+
+        // 1. Check if the enemy can see the player
+        let can_see_player = if let Some(target) = player_pos {
+            can_see_target(
+                enemy_pos,
+                soldier.facing_dir,
+                target,
+                enemy.vision_range,
+                enemy.vision_half_angle,
+                enemy.inner_radius,
+                &buildings,
+            )
+        } else {
+            false
+        };
+
+        // 2. State transitions
+        if can_see_player {
+            if enemy.state != EnemyAiState::Engage {
+                // Just acquired target: reset shoot timer so player gets a reaction delay
+                enemy.shoot_timer.reset();
+            }
+            enemy.state = EnemyAiState::Engage;
+            enemy.last_known_player_pos = player_pos;
+            enemy.investigate_timer.reset();
+        } else if enemy.state == EnemyAiState::Engage {
+            // Lost sight of player - switch to investigating last known location
+            enemy.state = EnemyAiState::Investigate;
+            enemy.investigate_timer.reset();
         }
 
-        // Face in patrol movement direction (+X when moving right, -X when moving left)
-        let facing = Vec2::new(enemy.dir, 0.0);
-        soldier.facing_dir = facing;
+        // 3. State behaviors
+        match enemy.state {
+            EnemyAiState::Engage => {
+                let target = player_pos.unwrap_or(enemy_pos);
+                let to_target = target - enemy_pos;
+                let dist = to_target.length();
 
-        let yaw = f32::atan2(-facing.x, -facing.y);
+                if dist > 0.001 {
+                    soldier.facing_dir = to_target / dist;
+                }
+
+                // Advance if player is beyond close firing range
+                if dist > 6.0 {
+                    let desired_move = soldier.facing_dir;
+                    let move_dir = find_avoidance_direction(
+                        enemy_pos,
+                        desired_move,
+                        &buildings,
+                        soldier_radius,
+                    );
+                    let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75) * dt;
+                    let resolved =
+                        resolve_circle_building_collision(next_pos, soldier_radius, &buildings);
+                    tf.translation.x = resolved.x;
+                    tf.translation.z = resolved.y;
+                }
+
+                // Fire at player
+                enemy.shoot_timer.tick(time.delta());
+                if enemy.shoot_timer.is_finished() {
+                    enemy.shoot_timer.reset();
+                    let spawn_pos =
+                        Vec2::new(tf.translation.x, tf.translation.z) + soldier.facing_dir * 0.85;
+
+                    commands.spawn((
+                        Mesh3d(bullet_assets.mesh.clone()),
+                        MeshMaterial3d(bullet_assets.enemy_material.clone()),
+                        Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
+                            .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                        Bullet {
+                            direction: soldier.facing_dir,
+                            speed: 38.0,
+                            lifetime: 1.6,
+                            team: Team::Enemy,
+                        },
+                    ));
+                }
+            }
+            EnemyAiState::Investigate => {
+                if let Some(target) = enemy.last_known_player_pos {
+                    let to_target = target - enemy_pos;
+                    let dist = to_target.length();
+
+                    if dist > 1.2 {
+                        // Move toward last known position with obstacle steering
+                        let desired_move = to_target / dist;
+                        let move_dir = find_avoidance_direction(
+                            enemy_pos,
+                            desired_move,
+                            &buildings,
+                            soldier_radius,
+                        );
+                        soldier.facing_dir = move_dir;
+                        let next_pos = enemy_pos + move_dir * enemy.speed * dt;
+                        let resolved =
+                            resolve_circle_building_collision(next_pos, soldier_radius, &buildings);
+                        tf.translation.x = resolved.x;
+                        tf.translation.z = resolved.y;
+                    } else {
+                        // At last known position: look around and search
+                        enemy.investigate_timer.tick(time.delta());
+                        let scan_angle = time.elapsed_secs() * 3.0;
+                        soldier.facing_dir = Vec2::new(scan_angle.cos(), scan_angle.sin());
+
+                        if enemy.investigate_timer.is_finished() {
+                            enemy.last_known_player_pos = None;
+                            enemy.state = EnemyAiState::Search;
+                        }
+                    }
+                } else {
+                    enemy.state = EnemyAiState::Search;
+                }
+            }
+            EnemyAiState::Search => {
+                let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
+                let to_wp = target_wp - enemy_pos;
+                let dist = to_wp.length();
+
+                if dist < 1.2 {
+                    enemy.current_waypoint_idx =
+                        (enemy.current_waypoint_idx + 1) % ENEMY_WAYPOINTS.len();
+                } else {
+                    let desired_move = to_wp / dist;
+                    let move_dir = find_avoidance_direction(
+                        enemy_pos,
+                        desired_move,
+                        &buildings,
+                        soldier_radius,
+                    );
+                    soldier.facing_dir = move_dir;
+                    let next_pos = enemy_pos + move_dir * enemy.speed * dt;
+                    let resolved =
+                        resolve_circle_building_collision(next_pos, soldier_radius, &buildings);
+                    tf.translation.x = resolved.x;
+                    tf.translation.z = resolved.y;
+                }
+            }
+        }
+
+        // Apply visual rotation from facing direction
+        let yaw = f32::atan2(-soldier.facing_dir.x, -soldier.facing_dir.y);
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
-
-        // 2. Periodic enemy shooting (Enemy team)
-        enemy.shoot_timer.tick(time.delta());
-        if enemy.shoot_timer.is_finished() {
-            enemy.shoot_timer.reset();
-            let spawn_pos = Vec2::new(tf.translation.x, tf.translation.z) + facing * 0.85;
-
-            commands.spawn((
-                Mesh3d(bullet_assets.mesh.clone()),
-                MeshMaterial3d(bullet_assets.enemy_material.clone()),
-                Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
-                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-                Bullet {
-                    direction: facing,
-                    speed: 35.0,
-                    lifetime: 1.8,
-                    team: Team::Enemy,
-                },
-            ));
-        }
     }
 }
 
@@ -711,8 +902,8 @@ fn update_bullets(
 
 // Dynamically sets enemy visibility based on player's vision cone and building line-of-sight
 fn update_enemy_visibility(
-    player_q: Query<(&Transform, &Soldier), With<Player>>,
-    mut enemy_q: Query<(&Transform, &mut Visibility), With<Enemy>>,
+    player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Enemy>)>,
+    mut enemy_q: Query<(&Transform, &mut Visibility), (With<Enemy>, Without<Player>)>,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
         (With<Building>, Without<Player>, Without<Enemy>),
@@ -732,7 +923,7 @@ fn update_enemy_visibility(
 
     for (enemy_tf, mut vis) in &mut enemy_q {
         let enemy_pos = Vec2::new(enemy_tf.translation.x, enemy_tf.translation.z);
-        let visible = is_point_visible_to_player(
+        let visible = can_see_target(
             player_pos,
             player_soldier.facing_dir,
             enemy_pos,
@@ -750,16 +941,143 @@ fn update_enemy_visibility(
     }
 }
 
-fn is_point_visible_to_player(
-    player_pos: Vec2,
-    player_dir: Vec2,
-    point: Vec2,
+// Checks if moving from `origin` in `dir` by `probe_dist` penetrates any building obstacle
+fn is_path_blocked(
+    origin: Vec2,
+    dir: Vec2,
+    probe_dist: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+    soldier_radius: f32,
+) -> bool {
+    // Check multiple probe distances along the candidate vector
+    // A slightly reduced test radius allows sliding along walls without falsely flagging grazing contacts
+    let check_radius = soldier_radius * 0.92;
+    let steps = [probe_dist * 0.35, probe_dist * 0.7, probe_dist];
+    for step in steps {
+        let probe = origin + dir * step;
+        for (b_tf, collider) in buildings {
+            let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+            let closest = Vec2::new(
+                probe.x.clamp(
+                    b_center.x - collider.half_size.x,
+                    b_center.x + collider.half_size.x,
+                ),
+                probe.y.clamp(
+                    b_center.y - collider.half_size.y,
+                    b_center.y + collider.half_size.y,
+                ),
+            );
+            if (probe - closest).length_squared() < check_radius * check_radius {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Determines the best unobstructed direction toward the desired goal, steering around obstacles
+fn find_avoidance_direction(
+    origin: Vec2,
+    desired_dir: Vec2,
+    buildings: &[(&Transform, &BuildingCollider)],
+    soldier_radius: f32,
+) -> Vec2 {
+    if desired_dir.length_squared() < 0.001 {
+        return desired_dir;
+    }
+    let desired_norm = desired_dir.normalize();
+
+    // If direct direction is clear, proceed directly
+    if !is_path_blocked(origin, desired_norm, 1.8, buildings, soldier_radius) {
+        return desired_norm;
+    }
+
+    // Branch alternate steering angles (left/right up to ~150 degrees)
+    const ANGLES: [f32; 10] = [
+        0.52, -0.52, // ~30 deg
+        1.05, -1.05, // ~60 deg
+        1.57, -1.57, // ~90 deg
+        2.09, -2.09, // ~120 deg
+        2.62, -2.62, // ~150 deg
+    ];
+
+    for angle in ANGLES {
+        let cos = angle.cos();
+        let sin = angle.sin();
+        let cand = Vec2::new(
+            desired_norm.x * cos - desired_norm.y * sin,
+            desired_norm.x * sin + desired_norm.y * cos,
+        );
+        if !is_path_blocked(origin, cand, 1.8, buildings, soldier_radius) {
+            return cand;
+        }
+    }
+
+    desired_norm
+}
+
+// Multi-pass circle vs AABB collision resolver with smooth sliding
+fn resolve_circle_building_collision(
+    mut pos: Vec2,
+    radius: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+) -> Vec2 {
+    for _ in 0..4 {
+        for (b_tf, collider) in buildings {
+            let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+            let closest = Vec2::new(
+                pos.x.clamp(
+                    b_center.x - collider.half_size.x,
+                    b_center.x + collider.half_size.x,
+                ),
+                pos.y.clamp(
+                    b_center.y - collider.half_size.y,
+                    b_center.y + collider.half_size.y,
+                ),
+            );
+
+            let diff = pos - closest;
+            let dist_sq = diff.length_squared();
+
+            if dist_sq < radius * radius {
+                if dist_sq > 0.00001 {
+                    let dist = dist_sq.sqrt();
+                    let overlap = radius - dist;
+                    pos += (diff / dist) * overlap;
+                } else {
+                    let d_left = (pos.x - (b_center.x - collider.half_size.x)).abs();
+                    let d_right = ((b_center.x + collider.half_size.x) - pos.x).abs();
+                    let d_top = (pos.y - (b_center.y - collider.half_size.y)).abs();
+                    let d_bottom = ((b_center.y + collider.half_size.y) - pos.y).abs();
+                    let min_d = d_left.min(d_right).min(d_top).min(d_bottom);
+                    if min_d == d_left {
+                        pos.x = b_center.x - collider.half_size.x - radius;
+                    } else if min_d == d_right {
+                        pos.x = b_center.x + collider.half_size.x + radius;
+                    } else if min_d == d_top {
+                        pos.y = b_center.y - collider.half_size.y - radius;
+                    } else {
+                        pos.y = b_center.y + collider.half_size.y + radius;
+                    }
+                }
+            }
+        }
+    }
+    pos.x = pos.x.clamp(-28.0, 28.0);
+    pos.y = pos.y.clamp(-28.0, 28.0);
+    pos
+}
+
+fn can_see_target(
+    seer_pos: Vec2,
+    seer_dir: Vec2,
+    target_pos: Vec2,
     vision_range: f32,
     vision_half_angle: f32,
     inner_radius: f32,
     buildings: &[(&Transform, &BuildingCollider)],
 ) -> bool {
-    let to_point = point - player_pos;
+    let to_point = target_pos - seer_pos;
     let dist = to_point.length();
 
     if dist > vision_range {
@@ -769,7 +1087,7 @@ fn is_point_visible_to_player(
     let in_inner = dist <= inner_radius;
     let in_cone = if dist > 0.001 {
         let dir = to_point / dist;
-        let dot = dir.dot(player_dir.normalize_or_zero());
+        let dot = dir.dot(seer_dir.normalize_or_zero());
         dot >= vision_half_angle.cos()
     } else {
         true
@@ -785,7 +1103,7 @@ fn is_point_visible_to_player(
         let b_min = b_center - collider.half_size;
         let b_max = b_center + collider.half_size;
 
-        if line_intersects_box(player_pos, point, b_min, b_max) {
+        if line_intersects_box(seer_pos, target_pos, b_min, b_max) {
             return false;
         }
     }
