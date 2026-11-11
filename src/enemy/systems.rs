@@ -237,6 +237,7 @@ pub fn update_enemy(
                             lifetime: 1.6,
                             team: Team::Enemy,
                             shooter_stance: soldier.stance,
+                            missed_entities: Vec::new(),
                         },
                     ));
                 }

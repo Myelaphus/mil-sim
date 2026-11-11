@@ -204,6 +204,7 @@ pub fn update_player(
                     lifetime: 1.5,
                     team: Team::Player,
                     shooter_stance: soldier.stance,
+                    missed_entities: Vec::new(),
                 },
             ));
         }

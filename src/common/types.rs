@@ -21,6 +21,12 @@ pub struct Soldier {
     pub stance: Stance,
 }
 
+#[derive(Component)]
+pub struct Corpse;
+
+#[derive(Component)]
+pub struct BloodDecal;
+
 #[allow(dead_code)]
 impl Soldier {
     pub fn is_crouched(&self) -> bool {

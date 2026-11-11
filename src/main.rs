@@ -45,7 +45,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use combat::bullet::BulletAssets;
+    use combat::bullet::{BulletAssets, CorpseAssets};
     use fog::material::FogMaterial;
 
     #[test]
@@ -58,13 +58,24 @@ mod tests {
         app.init_resource::<ButtonInput<KeyCode>>();
         let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
         let bullet_mesh = meshes.add(Circle::new(0.14));
+        let blood_pool_mesh = meshes.add(Circle::new(0.85));
+        let blood_splatter_mesh = meshes.add(Circle::new(0.22));
         let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
         let player_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
         let enemy_mat = materials.add(Color::srgb(1.0, 0.0, 0.0));
+        let blood_mat = materials.add(Color::srgb(0.5, 0.0, 0.0));
+        let corpse_mat = materials.add(Color::srgb(0.3, 0.3, 0.3));
         app.insert_resource(BulletAssets {
             mesh: bullet_mesh,
             player_material: player_mat,
             enemy_material: enemy_mat,
+        });
+        app.insert_resource(CorpseAssets {
+            blood_pool_mesh,
+            blood_splatter_mesh,
+            blood_material: blood_mat,
+            player_corpse_material: corpse_mat.clone(),
+            enemy_corpse_material: corpse_mat,
         });
         app.add_systems(
             Update,
