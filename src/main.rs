@@ -2,6 +2,7 @@ mod combat;
 mod common;
 mod enemy;
 mod fog;
+mod friendly;
 mod player;
 mod ui;
 mod world;
@@ -11,6 +12,7 @@ use combat::CombatPlugin;
 use common::geometry::resolve_soldier_pairwise_collisions;
 use enemy::EnemyPlugin;
 use fog::FogPlugin;
+use friendly::FriendlyPlugin;
 use player::PlayerPlugin;
 use ui::UiPlugin;
 use world::WorldPlugin;
@@ -30,6 +32,7 @@ fn main() {
             FogPlugin,
             CombatPlugin,
             PlayerPlugin,
+            FriendlyPlugin,
             EnemyPlugin,
             UiPlugin,
         ))
@@ -37,6 +40,7 @@ fn main() {
             Update,
             resolve_soldier_pairwise_collisions
                 .after(player::update_player)
+                .after(friendly::update_friendly)
                 .after(enemy::update_enemy),
         )
         .run();
@@ -82,6 +86,7 @@ mod tests {
             Update,
             (
                 player::update_player,
+                friendly::update_friendly,
                 enemy::update_enemy,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,

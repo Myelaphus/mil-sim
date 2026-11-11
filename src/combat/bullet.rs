@@ -5,6 +5,7 @@ use crate::common::types::{
     BloodDecal, Corpse, Soldier, Stance, Team, BULLET_RADIUS, SOLDIER_RADIUS, WORLD_HALF_SIZE,
 };
 use crate::enemy::ai::Enemy;
+use crate::friendly::Friendly;
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
 
@@ -167,6 +168,7 @@ pub fn update_bullets(
                         .remove::<Team>()
                         .remove::<Player>()
                         .remove::<Enemy>()
+                        .remove::<Friendly>()
                         .insert((
                             Corpse,
                             Visibility::Inherited,

@@ -103,17 +103,45 @@ pub fn setup_enemy(
 pub fn update_enemy(
     mut commands: Commands,
     time: Res<Time>,
-    mut enemy_q: Query<(&mut Transform, &mut Enemy, &mut Soldier), (With<Enemy>, Without<Player>)>,
-    player_q: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    mut enemy_q: Query<
+        (&mut Transform, &mut Enemy, &mut Soldier),
+        (With<Enemy>, Without<Player>, Without<crate::friendly::Friendly>),
+    >,
+    player_q: Query<
+        &Transform,
+        (With<Player>, Without<Enemy>, Without<crate::friendly::Friendly>),
+    >,
+    friendly_q: Query<
+        &Transform,
+        (With<crate::friendly::Friendly>, Without<Enemy>, Without<Player>),
+    >,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
-        (With<Building>, Without<Player>, Without<Enemy>),
+        (
+            With<Building>,
+            Without<Player>,
+            Without<Enemy>,
+            Without<crate::friendly::Friendly>,
+        ),
     >,
     low_walls_q: Query<
         (&Transform, &LowWallCollider),
-        (With<LowWall>, Without<Player>, Without<Enemy>),
+        (
+            With<LowWall>,
+            Without<Player>,
+            Without<Enemy>,
+            Without<crate::friendly::Friendly>,
+        ),
     >,
-    bullets_q: Query<(&Transform, &Bullet), (With<Bullet>, Without<Enemy>, Without<Player>)>,
+    bullets_q: Query<
+        (&Transform, &Bullet),
+        (
+            With<Bullet>,
+            Without<Enemy>,
+            Without<Player>,
+            Without<crate::friendly::Friendly>,
+        ),
+    >,
     bullet_assets: Res<BulletAssets>,
     mut gunshot_reader: MessageReader<GunshotEvent>,
 ) {
@@ -203,9 +231,10 @@ pub fn update_enemy(
             }
         }
 
-        // 1. Check if the enemy can see the player
-        let can_see_player = if let Some(target) = player_pos {
-            can_see_target(
+        // 1. Check if the enemy can see any squad member (player or friendly)
+        let mut visible_squad_targets: Vec<(Vec2, f32)> = Vec::new();
+        if let Some(target) = player_pos {
+            if can_see_target(
                 enemy_pos,
                 soldier.facing_dir,
                 target,
@@ -213,22 +242,38 @@ pub fn update_enemy(
                 enemy.vision_half_angle,
                 enemy.inner_radius,
                 &buildings,
-            )
-        } else {
-            false
-        };
+            ) {
+                visible_squad_targets.push((target, (target - enemy_pos).length_squared()));
+            }
+        }
+        for f_tf in &friendly_q {
+            let f_pos = Vec2::new(f_tf.translation.x, f_tf.translation.z);
+            if can_see_target(
+                enemy_pos,
+                soldier.facing_dir,
+                f_pos,
+                enemy.vision_range,
+                enemy.vision_half_angle,
+                enemy.inner_radius,
+                &buildings,
+            ) {
+                visible_squad_targets.push((f_pos, (f_pos - enemy_pos).length_squared()));
+            }
+        }
+        visible_squad_targets.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let can_see_squad_target = visible_squad_targets.first().map(|(pos, _)| *pos);
 
         // 2. State transitions
-        if can_see_player {
+        if let Some(target) = can_see_squad_target {
             if enemy.state != EnemyAiState::Engage {
-                // Just acquired target: reset shoot timer so player gets a reaction delay
+                // Just acquired target: reset shoot timer so squad gets a reaction delay
                 enemy.shoot_timer.reset();
             }
             enemy.state = EnemyAiState::Engage;
-            enemy.last_known_player_pos = player_pos;
+            enemy.last_known_player_pos = Some(target);
             enemy.investigate_timer.reset();
         } else if enemy.state == EnemyAiState::Engage {
-            // Lost sight of player - switch to investigating last known location
+            // Lost sight of squad target - switch to investigating last known location
             enemy.state = EnemyAiState::Investigate;
             enemy.investigate_timer.reset();
         }
