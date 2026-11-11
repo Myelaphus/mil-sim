@@ -4,7 +4,7 @@ use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     line_intersects_box, resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{Soldier, Stance, Team, SOLDIER_RADIUS};
+use crate::common::types::{GunshotEvent, Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 #[derive(Component)]
@@ -63,6 +63,7 @@ pub fn update_player(
     buildings_q: Query<(&Transform, &BuildingCollider), Without<Player>>,
     low_walls_q: Query<(&Transform, &LowWallCollider), Without<Player>>,
     other_soldiers_q: Query<&Transform, (With<Soldier>, Without<Player>)>,
+    mut gunshot_writer: MessageWriter<GunshotEvent>,
 ) {
     let Ok((mut soldier_tf, mut soldier)) = player_q.single_mut() else {
         return;
@@ -207,6 +208,10 @@ pub fn update_player(
                     missed_entities: Vec::new(),
                 },
             ));
+            gunshot_writer.write(GunshotEvent {
+                position: soldier_pos,
+                shooter_team: Team::Player,
+            });
         }
     }
 }

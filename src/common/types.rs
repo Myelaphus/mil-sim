@@ -10,6 +10,12 @@ pub const BULLET_RADIUS: f32 = 0.14;
 // Soldier movement clamp margin: derived directly from world dimensions and soldier physical radius
 pub const SOLDIER_WORLD_BOUND: f32 = WORLD_HALF_SIZE - (SOLDIER_RADIUS * 2.5);
 
+#[derive(Message, Clone, Copy, Debug)]
+pub struct GunshotEvent {
+    pub position: Vec2,
+    pub shooter_team: Team,
+}
+
 #[derive(Component, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Team {
     Player,

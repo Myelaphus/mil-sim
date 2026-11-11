@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision};
-use crate::common::types::{Soldier, Stance, Team, SOLDIER_RADIUS};
+use crate::common::types::{GunshotEvent, Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::enemy::ai::{Enemy, EnemyAiState, ENEMY_WAYPOINTS};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
@@ -113,7 +113,9 @@ pub fn update_enemy(
         (&Transform, &LowWallCollider),
         (With<LowWall>, Without<Player>, Without<Enemy>),
     >,
+    bullets_q: Query<(&Transform, &Bullet), (With<Bullet>, Without<Enemy>, Without<Player>)>,
     bullet_assets: Res<BulletAssets>,
+    mut gunshot_reader: MessageReader<GunshotEvent>,
 ) {
     let dt = time.delta_secs();
     let soldier_radius = SOLDIER_RADIUS;
@@ -124,8 +126,82 @@ pub fn update_enemy(
         .next()
         .map(|tf| Vec2::new(tf.translation.x, tf.translation.z));
 
+    // Collect all gunshot messages heard this frame so each enemy can process them
+    let heard_gunshots: Vec<GunshotEvent> = gunshot_reader.read().copied().collect();
+
     for (mut tf, mut enemy, mut soldier) in &mut enemy_q {
         let enemy_pos = Vec2::new(tf.translation.x, tf.translation.z);
+
+        // 0. React to nearby gunfire or active near-miss bullets if not already engaged in combat
+        if enemy.state != EnemyAiState::Engage {
+            let mut alert_source: Option<Vec2> = None;
+
+            // Check for nearby bullets flying past (near-miss suppression within 4.0m)
+            for (b_tf, bullet) in &bullets_q {
+                if bullet.team != Team::Enemy {
+                    let b_pos = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+                    if (b_pos - enemy_pos).length_squared() < 16.0 {
+                        alert_source = Some(bullet.origin);
+                        break;
+                    }
+                }
+            }
+
+            // Check acoustic hearing of gunshots across compound
+            if alert_source.is_none() {
+                for event in &heard_gunshots {
+                    if event.shooter_team != Team::Enemy {
+                        let to_gunshot = event.position - enemy_pos;
+                        let dist = to_gunshot.length();
+
+                        // Sound check: clear line-of-sight sound carries up to 55m;
+                        // sound blocked by solid concrete buildings is dampened to 35m.
+                        let has_los = can_see_target(
+                            enemy_pos,
+                            to_gunshot.normalize_or_zero(),
+                            event.position,
+                            60.0,
+                            std::f32::consts::PI, // Omnidirectional hearing (360 degrees)
+                            0.0,
+                            &buildings,
+                        );
+                        let max_hearing_dist = if has_los { 55.0 } else { 35.0 };
+
+                        if dist <= max_hearing_dist && dist > 0.05 {
+                            alert_source = Some(event.position);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some(source_pos) = alert_source {
+                let to_source = source_pos - enemy_pos;
+                if to_source.length_squared() > 0.01 {
+                    // 1. Immediately turn facing towards the source of the gunfire
+                    soldier.facing_dir = to_source.normalize();
+
+                    // 2. Optionally take cover:
+                    // If a low wall is within 3.5m, immediately duck behind it
+                    let near_low_wall = low_walls.iter().any(|(w_tf, _)| {
+                        let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+                        (w_pos - enemy_pos).length() < 3.5
+                    });
+
+                    if near_low_wall {
+                        soldier.stance = Stance::Crouching;
+                    } else if to_source.length() < 18.0 {
+                        // Close gunfire in the open: duck into crouch to reduce hit silhouette
+                        soldier.stance = Stance::Crouching;
+                    }
+
+                    // 3. Alert AI to investigate the gunfire position
+                    enemy.state = EnemyAiState::Investigate;
+                    enemy.last_known_player_pos = Some(source_pos);
+                    enemy.investigate_timer.reset();
+                }
+            }
+        }
 
         // 1. Check if the enemy can see the player
         let can_see_player = if let Some(target) = player_pos {
@@ -249,9 +325,19 @@ pub fn update_enemy(
                     let to_target = target - enemy_pos;
                     let dist = to_target.length();
 
+                    // Check if near a low wall for tactical cover during investigation
+                    let near_low_wall = low_walls.iter().any(|(w_tf, _)| {
+                        let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+                        (w_pos - enemy_pos).length() < 3.0
+                    });
+
                     if dist > 1.2 {
-                        // Move toward last known position at full standing speed
-                        soldier.stance = Stance::Standing;
+                        // If taking cover or near a low wall, crouch-walk for tactical cover; otherwise standing advance
+                        if near_low_wall {
+                            soldier.stance = Stance::Crouching;
+                        } else if soldier.stance != Stance::Crouching && soldier.stance != Stance::Prone {
+                            soldier.stance = Stance::Standing;
+                        }
                         let desired_move = to_target / dist;
                         let move_dir = find_avoidance_direction(
                             enemy_pos,
@@ -261,7 +347,12 @@ pub fn update_enemy(
                             soldier_radius,
                         );
                         soldier.facing_dir = move_dir;
-                        let next_pos = enemy_pos + move_dir * enemy.speed * dt;
+                        let speed = match soldier.stance {
+                            Stance::Standing => enemy.speed,
+                            Stance::Crouching => enemy.speed * 0.6,
+                            Stance::Prone => enemy.speed * 0.3,
+                        };
+                        let next_pos = enemy_pos + move_dir * speed * dt;
                         let resolved =
                             resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
                         tf.translation.x = resolved.x;
@@ -331,6 +422,327 @@ pub fn update_enemy(
             Stance::Crouching => Vec3::splat(0.72),
             Stance::Prone => Vec3::new(0.55, 1.15, 0.55),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enemy_turns_and_takes_cover_from_nearby_gunfire() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // Spawn low wall at (0.0, 1.0)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.4, 1.0),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(2.0, 0.4),
+            },
+        ));
+
+        // Spawn enemy at (0, 0) facing South (0, 1), in Search mode standing
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0), // South
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_enemy);
+
+        // Send a gunshot message from East (15.0, 0.0) fired by Player
+        app.world_mut().write_message(GunshotEvent {
+            position: Vec2::new(15.0, 0.0),
+            shooter_team: Team::Player,
+        });
+
+        app.update();
+
+        let enemy = app.world().get::<Enemy>(enemy_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+
+        // 1. Turned towards source of gunfire (East: x ≈ 1.0, y ≈ 0.0)
+        assert!(
+            soldier.facing_dir.x > 0.95,
+            "Enemy should face gunfire source, facing_dir: {:?}",
+            soldier.facing_dir
+        );
+
+        // 2. Took cover behind nearby low wall (crouching)
+        assert_eq!(
+            soldier.stance,
+            Stance::Crouching,
+            "Enemy should take cover (crouch) near low wall"
+        );
+
+        // 3. Switched state to Investigate with target position recorded
+        assert_eq!(enemy.state, EnemyAiState::Investigate);
+        assert_eq!(enemy.last_known_player_pos, Some(Vec2::new(15.0, 0.0)));
+    }
+
+    #[test]
+    fn test_enemy_reacts_to_near_miss_bullet() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // Spawn enemy at (0, 0) facing South (0, 1) in open field standing
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                },
+            ))
+            .id();
+
+        // Spawn an active player bullet whizzing 1.5m to the right (within 4m near-miss threshold)
+        // with origin at (10.0, 0.0)
+        app.world_mut().spawn((
+            Transform::from_xyz(1.5, 0.08, 0.0),
+            Bullet {
+                origin: Vec2::new(10.0, 0.0),
+                direction: Vec2::new(-1.0, 0.0),
+                speed: 45.0,
+                lifetime: 1.5,
+                team: Team::Player,
+                shooter_stance: Stance::Standing,
+                missed_entities: Vec::new(),
+            },
+        ));
+
+        app.add_systems(Update, update_enemy);
+        app.update();
+
+        let enemy = app.world().get::<Enemy>(enemy_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+
+        // Should turn towards bullet origin (East: x ≈ 1.0)
+        assert!(
+            soldier.facing_dir.x > 0.95,
+            "Enemy should face incoming bullet origin, facing_dir: {:?}",
+            soldier.facing_dir
+        );
+
+        // Near-miss close in open field triggers defensive crouch
+        assert_eq!(
+            soldier.stance,
+            Stance::Crouching,
+            "Enemy should duck into crouch upon near-miss"
+        );
+        assert_eq!(enemy.state, EnemyAiState::Investigate);
+    }
+
+    #[test]
+    fn test_enemy_spots_player_and_engages_after_turning_towards_gunfire() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // Enemy initially faces South (0, 1) at (0, 0)
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0), // Facing South, cannot see North
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                },
+            ))
+            .id();
+
+        // Player is behind enemy at (0.0, -10.0) (North)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, -10.0),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+            },
+        ));
+
+        app.add_systems(Update, update_enemy);
+
+        // Player fires gun at (0.0, -10.0)
+        app.world_mut().write_message(GunshotEvent {
+            position: Vec2::new(0.0, -10.0),
+            shooter_team: Team::Player,
+        });
+
+        app.update();
+
+        let enemy = app.world().get::<Enemy>(enemy_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+
+        // Enemy swiveled to face North towards gunshot (0.0, -1.0)
+        assert!(
+            soldier.facing_dir.y < -0.9,
+            "Enemy should swivel to face North, facing_dir: {:?}",
+            soldier.facing_dir
+        );
+
+        // Because player is at (0, -10) in clear line-of-sight, enemy spotted player and engaged!
+        assert_eq!(
+            enemy.state,
+            EnemyAiState::Engage,
+            "Enemy should transition directly to Engage upon spotting player"
+        );
+    }
+
+    #[test]
+    fn test_enemy_ignores_friendly_gunfire() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // Enemy facing South (0, 1) in Search
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_enemy);
+
+        // Friendly enemy fires from West (-10.0, 0.0)
+        app.world_mut().write_message(GunshotEvent {
+            position: Vec2::new(-10.0, 0.0),
+            shooter_team: Team::Enemy,
+        });
+
+        app.update();
+
+        let enemy = app.world().get::<Enemy>(enemy_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+
+        // Enemy should ignore friendly gunfire and stay on Search patrol
+        assert_eq!(enemy.state, EnemyAiState::Search);
+        assert_eq!(soldier.stance, Stance::Standing);
     }
 }
 

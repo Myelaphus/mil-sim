@@ -56,6 +56,7 @@ mod tests {
         app.init_resource::<Assets<FogMaterial>>();
         app.init_resource::<Time>();
         app.init_resource::<ButtonInput<KeyCode>>();
+        app.add_message::<common::types::GunshotEvent>();
         let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
         let bullet_mesh = meshes.add(Circle::new(common::types::BULLET_RADIUS));
         let blood_pool_mesh = meshes.add(Circle::new(0.85));

@@ -8,7 +8,8 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_bullet_assets)
+        app.add_message::<crate::common::types::GunshotEvent>()
+            .add_systems(Startup, setup_bullet_assets)
             .add_systems(Update, update_bullets);
     }
 }
