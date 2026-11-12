@@ -41,6 +41,7 @@ pub fn setup_player(
                 facing_dir: Vec2::new(0.0, -1.0), // Facing North (-Z)
                 shoot_cooldown: Timer::from_seconds(0.12, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ))
         .id();
@@ -165,55 +166,68 @@ pub fn update_player(
         }
     }
 
-    // 4. Spacebar shooting (Player team)
+    // 4. Weapon reloading & shooting (Player team)
+    soldier.ammo.tick_reload(time.delta());
+
+    // 'R' key manual reload
+    if keyboard_input.just_pressed(KeyCode::KeyR) {
+        soldier.ammo.start_reload();
+    }
+
     soldier.shoot_cooldown.tick(time.delta());
-    let should_shoot = keyboard_input.just_pressed(KeyCode::Space)
+    let wants_to_shoot = keyboard_input.just_pressed(KeyCode::Space)
         || (keyboard_input.pressed(KeyCode::Space) && soldier.shoot_cooldown.is_finished());
 
-    if should_shoot {
-        soldier.shoot_cooldown.reset();
-        let soldier_pos = Vec2::new(soldier_tf.translation.x, soldier_tf.translation.z);
-        let spawn_pos = soldier_pos + soldier.facing_dir * 0.85;
+    if wants_to_shoot {
+        if soldier.ammo.current_mag == 0 {
+            // Out of ammo in current magazine: automatically trigger reload if reserves available
+            soldier.ammo.start_reload();
+        } else if soldier.ammo.can_fire() {
+            soldier.shoot_cooldown.reset();
+            soldier.ammo.current_mag -= 1;
+            let soldier_pos = Vec2::new(soldier_tf.translation.x, soldier_tf.translation.z);
+            let spawn_pos = soldier_pos + soldier.facing_dir * 0.85;
 
-        // When crouched or prone, shots aimed directly into/across an adjacent low wall cannot pass through
-        let mut muzzle_blocked = false;
-        if soldier.stance != Stance::Standing {
-            for (w_tf, w_collider) in &low_walls_q {
-                let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
-                let w_min = w_center - w_collider.half_size;
-                let w_max = w_center + w_collider.half_size;
+            // When crouched or prone, shots aimed directly into/across an adjacent low wall cannot pass through
+            let mut muzzle_blocked = false;
+            if soldier.stance != Stance::Standing {
+                for (w_tf, w_collider) in &low_walls_q {
+                    let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+                    let w_min = w_center - w_collider.half_size;
+                    let w_max = w_center + w_collider.half_size;
 
-                let aim_probe = spawn_pos + soldier.facing_dir * 0.5;
-                if line_intersects_box(soldier_pos, aim_probe, w_min, w_max)
-                    || (spawn_pos.x >= w_min.x && spawn_pos.x <= w_max.x && spawn_pos.y >= w_min.y && spawn_pos.y <= w_max.y)
-                {
-                    muzzle_blocked = true;
-                    break;
+                    let aim_probe = spawn_pos + soldier.facing_dir * 0.5;
+                    if line_intersects_box(soldier_pos, aim_probe, w_min, w_max)
+                        || (spawn_pos.x >= w_min.x && spawn_pos.x <= w_max.x && spawn_pos.y >= w_min.y && spawn_pos.y <= w_max.y)
+                    {
+                        muzzle_blocked = true;
+                        break;
+                    }
                 }
             }
-        }
 
-        if !muzzle_blocked {
-            commands.spawn((
-                LevelEntity,
-                Mesh3d(bullet_assets.mesh.clone()),
-                MeshMaterial3d(bullet_assets.player_material.clone()),
-                Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
-                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-                Bullet {
-                    origin: soldier_pos,
-                    direction: soldier.facing_dir,
-                    speed: 45.0,
-                    lifetime: 1.5,
-                    team: Team::Player,
-                    shooter_stance: soldier.stance,
-                    missed_entities: Vec::new(),
-                },
-            ));
-            gunshot_writer.write(GunshotEvent {
-                position: soldier_pos,
-                shooter_team: Team::Player,
-            });
+            if !muzzle_blocked {
+                commands.spawn((
+                    LevelEntity,
+                    Mesh3d(bullet_assets.mesh.clone()),
+                    MeshMaterial3d(bullet_assets.player_material.clone()),
+                    Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
+                        .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                    Bullet {
+                        origin: soldier_pos,
+                        direction: soldier.facing_dir,
+                        speed: 45.0,
+                        lifetime: 1.5,
+                        team: Team::Player,
+                        shooter_stance: soldier.stance,
+                        missed_entities: Vec::new(),
+                    },
+                ));
+                gunshot_writer.write(GunshotEvent {
+                    position: soldier_pos,
+                    shooter_team: Team::Player,
+                });
+            }
         }
     }
 }

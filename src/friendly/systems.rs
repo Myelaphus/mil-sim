@@ -83,6 +83,7 @@ pub fn setup_friendly(
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -153,6 +154,7 @@ pub fn update_friendly(
     let heard_gunshots: Vec<GunshotEvent> = gunshot_mutator.read().map(|e| *e).collect();
 
     for (mut tf, mut friendly, mut soldier) in &mut friendly_q {
+        soldier.ammo.tick_reload(time.delta());
         let friendly_pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         // 1. Target acquisition: scan vision cone for living enemies in line of sight
@@ -234,35 +236,40 @@ pub fn update_friendly(
                     // Fire weapon at target enemy
                     friendly.shoot_timer.tick(time.delta());
                     if friendly.shoot_timer.is_finished() {
-                        friendly.shoot_timer.reset();
+                        if soldier.ammo.current_mag == 0 {
+                            soldier.ammo.start_reload();
+                        } else if soldier.ammo.can_fire() {
+                            friendly.shoot_timer.reset();
+                            soldier.ammo.current_mag -= 1;
 
-                        // Pop up to standing momentarily to fire over low wall
-                        if near_low_wall {
-                            soldier.stance = Stance::Standing;
+                            // Pop up to standing momentarily to fire over low wall
+                            if near_low_wall {
+                                soldier.stance = Stance::Standing;
+                            }
+
+                            let spawn_pos = friendly_pos + soldier.facing_dir * 0.85;
+                            commands.spawn((
+                                LevelEntity,
+                                Mesh3d(bullet_assets.mesh.clone()),
+                                MeshMaterial3d(bullet_assets.player_material.clone()),
+                                Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
+                                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                                Bullet {
+                                    origin: friendly_pos,
+                                    direction: soldier.facing_dir,
+                                    speed: 45.0,
+                                    lifetime: 1.5,
+                                    team: Team::Player,
+                                    shooter_stance: soldier.stance,
+                                    missed_entities: Vec::new(),
+                                },
+                            ));
+
+                            gunshot_mutator.write(GunshotEvent {
+                                position: friendly_pos,
+                                shooter_team: Team::Player,
+                            });
                         }
-
-                        let spawn_pos = friendly_pos + soldier.facing_dir * 0.85;
-                        commands.spawn((
-                            LevelEntity,
-                            Mesh3d(bullet_assets.mesh.clone()),
-                            MeshMaterial3d(bullet_assets.player_material.clone()),
-                            Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
-                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-                            Bullet {
-                                origin: friendly_pos,
-                                direction: soldier.facing_dir,
-                                speed: 45.0,
-                                lifetime: 1.5,
-                                team: Team::Player,
-                                shooter_stance: soldier.stance,
-                                missed_entities: Vec::new(),
-                            },
-                        ));
-
-                        gunshot_mutator.write(GunshotEvent {
-                            position: friendly_pos,
-                            shooter_team: Team::Player,
-                        });
                     }
                 }
             }
@@ -389,6 +396,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, -1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -413,6 +421,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -448,6 +457,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, -1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Crouching,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -471,6 +481,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -498,6 +509,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, -1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -522,6 +534,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -547,6 +560,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, 1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -585,6 +599,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, -1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -618,6 +633,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -643,6 +659,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, 1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -655,5 +672,102 @@ mod tests {
             Stance::Crouching,
             "Friendly should take cover (crouch) behind low wall during combat"
         );
+    }
+
+    #[test]
+    fn test_friendly_reloads_when_magazine_empty() {
+        let mut app = create_test_app();
+
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 0.0),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
+            },
+        ));
+
+        // Friendly with 0 rounds in current magazine
+        let mut empty_ammo = crate::common::types::WeaponAmmo::default();
+        empty_ammo.current_mag = 0;
+
+        let friendly_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 2.0),
+                Friendly {
+                    slot: 0,
+                    state: FriendlyAiState::Follow,
+                    shoot_timer: Timer::from_seconds(0.05, TimerMode::Repeating),
+                    speed: 5.6,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    target_pos: None,
+                    target_lost_timer: 0.0,
+                },
+                Team::Player,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    ammo: empty_ammo,
+                },
+            ))
+            .id();
+
+        // Enemy at (0.0, -10.0)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, -10.0),
+            Enemy {
+                state: crate::enemy::ai::EnemyAiState::Search,
+                current_waypoint_idx: 0,
+                last_known_player_pos: None,
+                investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                speed: 5.5,
+                vision_range: 24.0,
+                vision_half_angle: 45.0_f32.to_radians(),
+                inner_radius: 2.0,
+                stuck_timer: 0.0,
+                last_pos: Vec2::ZERO,
+            },
+            Team::Enemy,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
+            },
+        ));
+
+        app.add_systems(Update, update_friendly);
+
+        // Frame 1: Triggers shoot check, discovers mag is empty, starts reloading
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(60));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(friendly_entity).unwrap();
+        assert!(soldier.ammo.is_reloading(), "Friendly should start reloading when mag is empty");
+        assert_eq!(soldier.ammo.current_mag, 0);
+
+        // No bullets should have been fired
+        let mut bullets_q = app.world_mut().query::<&Bullet>();
+        assert_eq!(bullets_q.iter(app.world()).count(), 0);
+
+        // Advance 2.1 seconds to finish reload
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(2100));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(friendly_entity).unwrap();
+        assert!(!soldier.ammo.is_reloading(), "Reload should be finished");
+        // Reloaded to 30 rounds, and immediately resumed combat by firing 1 round
+        assert_eq!(soldier.ammo.current_mag, 29);
+        assert_eq!(soldier.ammo.reserve_mags, 5);
     }
 }

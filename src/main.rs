@@ -103,6 +103,7 @@ mod tests {
                 resolve_soldier_pairwise_collisions,
                 world::update_camera,
                 ui::update_fps,
+                ui::update_ammo_ui,
                 ui::update_main_menu_interactions,
                 ui::check_level_end_conditions,
             ),

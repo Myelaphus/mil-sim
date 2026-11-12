@@ -207,7 +207,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                         TextColor(Color::srgb(0.75, 0.80, 0.85)),
                     ));
                     controls.spawn((
-                        Text::new("• SPACE: Fire Weapon  |  C: Toggle Crouch  |  V: Toggle Prone"),
+                        Text::new("• SPACE: Fire Weapon  |  R: Reload (2s)  |  C: Crouch  |  V: Prone"),
                         TextFont {
                             font_size: FontSize::Px(12.0),
                             ..default()

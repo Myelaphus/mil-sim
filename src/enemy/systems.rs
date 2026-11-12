@@ -15,7 +15,7 @@ use crate::world::buildings::{
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
-pub const DEFAULT_ZOMBIE_COUNT: usize = 120;
+pub const DEFAULT_ZOMBIE_COUNT: usize = 360;
 
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ZombieSpawnConfig {
@@ -120,6 +120,7 @@ pub fn setup_guards(
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -376,6 +377,7 @@ pub fn setup_zombies(
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -464,6 +466,7 @@ pub fn update_enemy(
     let heard_gunshots: Vec<GunshotEvent> = gunshot_reader.read().copied().collect();
 
     for (mut tf, mut enemy, mut soldier) in &mut enemy_q {
+        soldier.ammo.tick_reload(time.delta());
         let enemy_pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         // 0. React to nearby gunfire or active near-miss bullets if not already engaged in combat
@@ -653,32 +656,37 @@ pub fn update_enemy(
                 // Fire at player
                 enemy.shoot_timer.tick(time.delta());
                 if enemy.shoot_timer.is_finished() {
-                    enemy.shoot_timer.reset();
+                    if soldier.ammo.current_mag == 0 {
+                        soldier.ammo.start_reload();
+                    } else if soldier.ammo.can_fire() {
+                        enemy.shoot_timer.reset();
+                        soldier.ammo.current_mag -= 1;
 
-                    // If crouched behind a low wall, pop up to standing to shoot over the wall
-                    if near_low_wall {
-                        soldier.stance = Stance::Standing;
+                        // If crouched behind a low wall, pop up to standing to shoot over the wall
+                        if near_low_wall {
+                            soldier.stance = Stance::Standing;
+                        }
+
+                        let spawn_pos = Vec2::new(tf.translation.x, tf.translation.z)
+                            + soldier.facing_dir * 0.85;
+
+                        commands.spawn((
+                            LevelEntity,
+                            Mesh3d(bullet_assets.mesh.clone()),
+                            MeshMaterial3d(bullet_assets.enemy_material.clone()),
+                            Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
+                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                            Bullet {
+                                origin: spawn_pos,
+                                direction: soldier.facing_dir,
+                                speed: 38.0,
+                                lifetime: 1.6,
+                                team: Team::Enemy,
+                                shooter_stance: soldier.stance,
+                                missed_entities: Vec::new(),
+                            },
+                        ));
                     }
-
-                    let spawn_pos =
-                        Vec2::new(tf.translation.x, tf.translation.z) + soldier.facing_dir * 0.85;
-
-                    commands.spawn((
-                        LevelEntity,
-                        Mesh3d(bullet_assets.mesh.clone()),
-                        MeshMaterial3d(bullet_assets.enemy_material.clone()),
-                        Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
-                            .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-                        Bullet {
-                            origin: spawn_pos,
-                            direction: soldier.facing_dir,
-                            speed: 38.0,
-                            lifetime: 1.6,
-                            team: Team::Enemy,
-                            shooter_stance: soldier.stance,
-                            missed_entities: Vec::new(),
-                        },
-                    ));
                 }
             }
             EnemyAiState::Investigate => {
@@ -1064,6 +1072,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0), // South
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -1141,6 +1150,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -1223,6 +1233,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0), // Facing South, cannot see North
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -1236,6 +1247,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, 1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
             },
         ));
 
@@ -1308,6 +1320,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -1336,6 +1349,7 @@ mod tests {
         app.init_resource::<Assets<Mesh>>();
         app.init_resource::<Assets<StandardMaterial>>();
         app.insert_resource(CurrentLevel::Level2);
+        app.insert_resource(ZombieSpawnConfig { count: 20 });
 
         app.add_systems(Update, setup_enemy);
         app.update();
@@ -1422,6 +1436,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -1573,5 +1588,96 @@ mod tests {
             .count();
 
         assert_eq!(zombie_count, 32, "Should spawn 32 zombies as configured");
+    }
+
+    #[test]
+    fn test_enemy_reloads_when_magazine_empty() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // Spawn player at (0.0, -8.0)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, -8.0),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
+            },
+        ));
+
+        // Spawn enemy at (0, 0) facing North (0, -1) with 0 ammo in mag
+        let mut empty_ammo = crate::common::types::WeaponAmmo::default();
+        empty_ammo.current_mag = 0;
+
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Enemy {
+                    state: EnemyAiState::Engage,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: Some(Vec2::new(0.0, -8.0)),
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.05, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    ammo: empty_ammo,
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_enemy);
+
+        // Frame 1: Triggers shoot check, discovers mag is empty, starts reloading
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(60));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        assert!(
+            soldier.ammo.is_reloading(),
+            "Enemy should start reload when empty"
+        );
+        assert_eq!(soldier.ammo.current_mag, 0);
+
+        // Advance 2.1 seconds to finish reload
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(2100));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        assert!(
+            !soldier.ammo.is_reloading(),
+            "Reload should finish after 2.0 seconds"
+        );
+        // Reloaded to 30 rounds, and immediately engaged target by firing 1 round
+        assert_eq!(soldier.ammo.current_mag, 29);
+        assert_eq!(soldier.ammo.reserve_mags, 5);
     }
 }

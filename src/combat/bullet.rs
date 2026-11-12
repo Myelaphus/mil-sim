@@ -276,6 +276,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
@@ -371,6 +372,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Prone,
+                    ammo: crate::common::types::WeaponAmmo::default(),
                 },
             ))
             .id();
