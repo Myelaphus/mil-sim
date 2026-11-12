@@ -10,6 +10,7 @@ mod world;
 use bevy::prelude::*;
 use combat::CombatPlugin;
 use common::geometry::resolve_soldier_pairwise_collisions;
+use common::types::AppState;
 use enemy::EnemyPlugin;
 use fog::FogPlugin;
 use friendly::FriendlyPlugin;
@@ -21,12 +22,13 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Mil-Sim - Vision Cone & Fog of War".to_string(),
+                title: "Mil-Sim - Tactical Operations".to_string(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
             ..default()
         }))
+        .init_state::<AppState>()
         .add_plugins((
             WorldPlugin,
             FogPlugin,
@@ -41,7 +43,8 @@ fn main() {
             resolve_soldier_pairwise_collisions
                 .after(player::update_player)
                 .after(friendly::update_friendly)
-                .after(enemy::update_enemy),
+                .after(enemy::update_enemy)
+                .run_if(in_state(AppState::InGame)),
         )
         .run();
 }
@@ -60,6 +63,9 @@ mod tests {
         app.init_resource::<Assets<FogMaterial>>();
         app.init_resource::<Time>();
         app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ui::LevelEndManager>();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<AppState>();
         app.add_message::<common::types::GunshotEvent>();
         let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
         let bullet_mesh = meshes.add(Circle::new(common::types::BULLET_RADIUS));
@@ -93,6 +99,8 @@ mod tests {
                 resolve_soldier_pairwise_collisions,
                 world::update_camera,
                 ui::update_fps,
+                ui::update_main_menu_interactions,
+                ui::check_level_end_conditions,
             ),
         );
         app.update();

@@ -10,7 +10,10 @@ impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<crate::common::types::GunshotEvent>()
             .add_systems(Startup, setup_bullet_assets)
-            .add_systems(Update, update_bullets);
+            .add_systems(
+                Update,
+                update_bullets.run_if(in_state(crate::common::types::AppState::InGame)),
+            );
     }
 }
 

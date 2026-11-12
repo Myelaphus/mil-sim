@@ -3,7 +3,7 @@ pub mod mesh;
 
 use bevy::prelude::*;
 pub use material::*;
-use crate::common::types::WORLD_SIZE;
+use crate::common::types::{AppState, LevelEntity, WORLD_SIZE};
 use crate::world::buildings::COMPOUND_BUILDINGS;
 
 pub struct FogPlugin;
@@ -11,8 +11,8 @@ pub struct FogPlugin;
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<FogMaterial>::default())
-            .add_systems(Startup, setup_fog)
-            .add_systems(Update, sync_fog_uniforms);
+            .add_systems(OnEnter(AppState::InGame), setup_fog)
+            .add_systems(Update, sync_fog_uniforms.run_if(in_state(AppState::InGame)));
     }
 }
 
@@ -48,6 +48,7 @@ fn setup_fog(
     });
 
     commands.spawn((
+        LevelEntity,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(WORLD_SIZE * 2.0, WORLD_SIZE * 2.0))),
         MeshMaterial3d(fog_material),
         Transform::from_xyz(0.0, 4.0, 0.0),

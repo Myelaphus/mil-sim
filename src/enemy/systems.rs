@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision};
-use crate::common::types::{GunshotEvent, Soldier, Stance, Team, SOLDIER_RADIUS};
+use crate::common::types::{GunshotEvent, LevelEntity, Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::enemy::ai::{Enemy, EnemyAiState, ENEMY_WAYPOINTS};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
@@ -54,6 +54,7 @@ pub fn setup_enemy(
         let yaw = f32::atan2(-facing.x, -facing.y);
         let enemy = commands
             .spawn((
+                LevelEntity,
                 Mesh3d(enemy_soldier_mesh.clone()),
                 MeshMaterial3d(enemy_soldier_material.clone()),
                 Transform::from_xyz(pos.x, 0.05, pos.y)
@@ -349,6 +350,7 @@ pub fn update_enemy(
                         Vec2::new(tf.translation.x, tf.translation.z) + soldier.facing_dir * 0.85;
 
                     commands.spawn((
+                        LevelEntity,
                         Mesh3d(bullet_assets.mesh.clone()),
                         MeshMaterial3d(bullet_assets.enemy_material.clone()),
                         Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)

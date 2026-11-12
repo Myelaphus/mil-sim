@@ -2,7 +2,7 @@ pub mod buildings;
 
 use bevy::prelude::*;
 pub use buildings::*;
-use crate::common::types::{WORLD_HALF_SIZE, WORLD_SIZE};
+use crate::common::types::{AppState, LevelEntity, WORLD_HALF_SIZE, WORLD_SIZE};
 
 // Camera framing constants derived mathematically from viewport aspect ratio and world dimensions
 pub const CAMERA_VIEWPORT_HEIGHT: f32 = 68.0;
@@ -15,8 +15,9 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_world)
-            .add_systems(Update, update_camera);
+        app.add_systems(Startup, setup_world_environment)
+            .add_systems(OnEnter(AppState::InGame), (setup_level_world, reset_camera_to_spawn))
+            .add_systems(Update, update_camera.run_if(in_state(AppState::InGame)));
     }
 }
 
@@ -35,11 +36,14 @@ pub fn update_camera(
     }
 }
 
-fn setup_world(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+pub fn reset_camera_to_spawn(mut camera_q: Query<&mut Transform, With<Camera3d>>) {
+    if let Ok(mut cam_tf) = camera_q.single_mut() {
+        cam_tf.translation = Vec3::new(0.0, 60.0, CAMERA_MAX_Z);
+        *cam_tf = cam_tf.looking_at(Vec3::new(0.0, 0.0, CAMERA_MAX_Z), Vec3::NEG_Z);
+    }
+}
+
+fn setup_world_environment(mut commands: Commands) {
     // Top-down camera (orthographic projection looking straight down with pulled-back zoom)
     commands.spawn((
         Camera3d::default(),
@@ -61,9 +65,16 @@ fn setup_world(
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.5, 0.0)),
     ));
+}
 
+pub fn setup_level_world(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     // Ground plane sized to unified WORLD_SIZE
     commands.spawn((
+        LevelEntity,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(WORLD_SIZE, WORLD_SIZE))),
         MeshMaterial3d(materials.add(Color::srgb(0.22, 0.35, 0.22))),
     ));
@@ -75,9 +86,10 @@ fn setup_world(
         ..default()
     });
 
-    // Spawn 4 buildings
+    // Spawn buildings
     for (size, position) in COMPOUND_BUILDINGS {
         commands.spawn((
+            LevelEntity,
             Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
             MeshMaterial3d(building_material.clone()),
             Transform::from_translation(position),
@@ -98,6 +110,7 @@ fn setup_world(
     // Spawn waist-height low walls
     for (size, position) in COMPOUND_LOW_WALLS {
         commands.spawn((
+            LevelEntity,
             Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
             MeshMaterial3d(low_wall_material.clone()),
             Transform::from_translation(position),

@@ -2,7 +2,8 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::common::geometry::line_intersects_box;
 use crate::common::types::{
-    BloodDecal, Corpse, Soldier, Stance, Team, BULLET_RADIUS, SOLDIER_RADIUS, WORLD_HALF_SIZE,
+    BloodDecal, Corpse, LevelEntity, Soldier, Stance, Team, BULLET_RADIUS, SOLDIER_RADIUS,
+    WORLD_HALF_SIZE,
 };
 use crate::enemy::ai::Enemy;
 use crate::friendly::Friendly;
@@ -184,6 +185,7 @@ pub fn update_bullets(
 
                     // Spawn primary blood pool decal underneath
                     commands.spawn((
+                        LevelEntity,
                         Mesh3d(corpse_assets.blood_pool_mesh.clone()),
                         MeshMaterial3d(corpse_assets.blood_material.clone()),
                         Transform::from_xyz(char_pos.x, 0.015, char_pos.y)
@@ -198,6 +200,7 @@ pub fn update_bullets(
                     ];
                     for offset in splatters {
                         commands.spawn((
+                            LevelEntity,
                             Mesh3d(corpse_assets.blood_splatter_mesh.clone()),
                             MeshMaterial3d(corpse_assets.blood_material.clone()),
                             Transform::from_xyz(char_pos.x + offset.x, 0.015, char_pos.y + offset.y)

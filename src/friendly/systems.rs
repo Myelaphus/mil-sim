@@ -1,15 +1,15 @@
-use std::f32::consts::FRAC_PI_2;
-use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{GunshotEvent, Soldier, Stance, Team, SOLDIER_RADIUS};
+use crate::common::types::{GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Team};
 use crate::enemy::ai::Enemy;
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::friendly::ai::{Friendly, FriendlyAiState};
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
+use bevy::prelude::*;
+use std::f32::consts::FRAC_PI_2;
 
 // Spawns 2 friendly squad members flanking the player in a wedge formation
 pub fn setup_friendly(
@@ -46,7 +46,11 @@ pub fn setup_friendly(
     // Spawn 2 friendlies flanking player's starting gate position (0.0, 48.0)
     let friendly_configs = [
         // Left wingman: slot 0, offset (-2.4, 2.2) behind-left
-        (Vec2::new(-2.4, 50.2), Vec2::new(-0.35, -0.94).normalize(), 0),
+        (
+            Vec2::new(-2.4, 50.2),
+            Vec2::new(-0.35, -0.94).normalize(),
+            0,
+        ),
         // Right wingman: slot 1, offset (2.4, 2.2) behind-right
         (Vec2::new(2.4, 50.2), Vec2::new(0.35, -0.94).normalize(), 1),
     ];
@@ -55,6 +59,7 @@ pub fn setup_friendly(
         let yaw = f32::atan2(-facing.x, -facing.y);
         let friendly = commands
             .spawn((
+                LevelEntity,
                 Mesh3d(friendly_soldier_mesh.clone()),
                 MeshMaterial3d(friendly_soldier_material.clone()),
                 Transform::from_xyz(pos.x, 0.05, pos.y)
@@ -62,7 +67,10 @@ pub fn setup_friendly(
                 Friendly {
                     slot,
                     state: FriendlyAiState::Follow,
-                    shoot_timer: Timer::from_seconds(0.38 + (slot as f32 * 0.08), TimerMode::Repeating),
+                    shoot_timer: Timer::from_seconds(
+                        0.38 + (slot as f32 * 0.08),
+                        TimerMode::Repeating,
+                    ),
                     speed: 5.6,
                     vision_range: 24.0,
                     vision_half_angle: 45.0_f32.to_radians(),
@@ -134,10 +142,13 @@ pub fn update_friendly(
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
 
-    let player_info = player_q
-        .iter()
-        .next()
-        .map(|(tf, s)| (Vec2::new(tf.translation.x, tf.translation.z), s.facing_dir, s.stance));
+    let player_info = player_q.iter().next().map(|(tf, s)| {
+        (
+            Vec2::new(tf.translation.x, tf.translation.z),
+            s.facing_dir,
+            s.stance,
+        )
+    });
 
     let heard_gunshots: Vec<GunshotEvent> = gunshot_mutator.read().map(|e| *e).collect();
 
@@ -232,6 +243,7 @@ pub fn update_friendly(
 
                         let spawn_pos = friendly_pos + soldier.facing_dir * 0.85;
                         commands.spawn((
+                            LevelEntity,
                             Mesh3d(bullet_assets.mesh.clone()),
                             MeshMaterial3d(bullet_assets.player_material.clone()),
                             Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
@@ -276,7 +288,8 @@ pub fn update_friendly(
                     let guard_facing = Vec2::new(
                         p_facing.x * cos_a - p_facing.y * sin_a,
                         p_facing.x * sin_a + p_facing.y * cos_a,
-                    ).normalize();
+                    )
+                    .normalize();
 
                     let to_spot = formation_spot - friendly_pos;
                     let dist_to_spot = to_spot.length();

@@ -4,7 +4,7 @@ use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     line_intersects_box, resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{GunshotEvent, Soldier, Stance, Team, SOLDIER_RADIUS};
+use crate::common::types::{GunshotEvent, LevelEntity, Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 #[derive(Component)]
@@ -30,6 +30,7 @@ pub fn setup_player(
 
     let player = commands
         .spawn((
+            LevelEntity,
             Mesh3d(player_soldier_mesh),
             MeshMaterial3d(player_soldier_material),
             Transform::from_xyz(0.0, 0.05, 48.0)
@@ -194,6 +195,7 @@ pub fn update_player(
 
         if !muzzle_blocked {
             commands.spawn((
+                LevelEntity,
                 Mesh3d(bullet_assets.mesh.clone()),
                 MeshMaterial3d(bullet_assets.player_material.clone()),
                 Transform::from_xyz(spawn_pos.x, 0.08, spawn_pos.y)
