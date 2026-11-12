@@ -29,6 +29,7 @@ fn main() {
             ..default()
         }))
         .init_state::<AppState>()
+        .init_resource::<common::types::CurrentLevel>()
         .add_plugins((
             WorldPlugin,
             FogPlugin,
@@ -44,6 +45,7 @@ fn main() {
                 .after(player::update_player)
                 .after(friendly::update_friendly)
                 .after(enemy::update_enemy)
+                .after(enemy::update_zombies)
                 .run_if(in_state(AppState::InGame)),
         )
         .run();
@@ -64,6 +66,7 @@ mod tests {
         app.init_resource::<Time>();
         app.init_resource::<ButtonInput<KeyCode>>();
         app.init_resource::<ui::LevelEndManager>();
+        app.init_resource::<common::types::CurrentLevel>();
         app.add_plugins(bevy::state::app::StatesPlugin);
         app.init_state::<AppState>();
         app.add_message::<common::types::GunshotEvent>();
@@ -94,6 +97,7 @@ mod tests {
                 player::update_player,
                 friendly::update_friendly,
                 enemy::update_enemy,
+                enemy::update_zombies,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
                 resolve_soldier_pairwise_collisions,

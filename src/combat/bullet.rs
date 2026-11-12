@@ -170,6 +170,7 @@ pub fn update_bullets(
                         .remove::<Player>()
                         .remove::<Enemy>()
                         .remove::<Friendly>()
+                        .remove::<crate::enemy::ai::Zombie>()
                         .insert((
                             Corpse,
                             Visibility::Inherited,

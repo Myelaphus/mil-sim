@@ -1,17 +1,59 @@
-use std::f32::consts::FRAC_PI_2;
-use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
-use crate::common::geometry::{can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision};
-use crate::common::types::{GunshotEvent, LevelEntity, Soldier, Stance, Team, SOLDIER_RADIUS};
-use crate::enemy::ai::{Enemy, EnemyAiState, ENEMY_WAYPOINTS};
+use crate::common::geometry::{
+    can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision,
+};
+use crate::common::types::{
+    CurrentLevel, GunshotEvent, LevelEntity, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance,
+    Team,
+};
+use crate::enemy::ai::{ENEMY_WAYPOINTS, Enemy, EnemyAiState, Zombie};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
-use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
+use crate::world::buildings::{
+    Building, BuildingCollider, COMPOUND_BUILDINGS, COMPOUND_LOW_WALLS, LowWall, LowWallCollider,
+};
+use bevy::prelude::*;
+use std::f32::consts::FRAC_PI_2;
+
+pub const DEFAULT_ZOMBIE_COUNT: usize = 120;
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ZombieSpawnConfig {
+    pub count: usize,
+}
+
+impl Default for ZombieSpawnConfig {
+    fn default() -> Self {
+        Self {
+            count: DEFAULT_ZOMBIE_COUNT,
+        }
+    }
+}
 
 pub fn setup_enemy(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    current_level: Res<CurrentLevel>,
+    zombie_config: Option<Res<ZombieSpawnConfig>>,
+    time: Option<Res<Time>>,
+) {
+    match *current_level {
+        CurrentLevel::Level1 => setup_guards(&mut commands, &mut meshes, &mut materials),
+        CurrentLevel::Level2 => {
+            let count = zombie_config.map_or(DEFAULT_ZOMBIE_COUNT, |c| c.count);
+            let seed = time
+                .as_ref()
+                .map_or(42, |t| (t.elapsed().as_nanos() as u64) ^ 0x517cc1b727220a95);
+            setup_zombies(&mut commands, &mut meshes, &mut materials, count, seed);
+        }
+    }
+}
+
+pub fn setup_guards(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
     let pointer_mesh = meshes.add(Circle::new(0.15));
     let enemy_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
@@ -100,21 +142,284 @@ pub fn setup_enemy(
     }
 }
 
+// Fast, robust, non-cryptographic PRNG (64-bit LCG) for deterministic dynamic placement
+#[derive(Clone, Copy, Debug)]
+pub struct SimpleRng {
+    state: u64,
+}
+
+impl SimpleRng {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 { 0x853c49e6748fea9b } else { seed },
+        }
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.state >> 32) as u32
+    }
+
+    pub fn next_f32(&mut self) -> f32 {
+        (self.next_u32() as f32) / (u32::MAX as f32)
+    }
+
+    pub fn range(&mut self, min: f32, max: f32) -> f32 {
+        min + self.next_f32() * (max - min)
+    }
+}
+
+// Validates whether a candidate 2D position is clear of all world collision objects,
+// safe from player spawn, within world bounds, and separated from already placed spawns.
+pub fn is_spawn_position_valid(
+    pos: Vec2,
+    soldier_radius: f32,
+    existing_spawns: &[Vec2],
+    min_separation: f32,
+    player_safe_pos: Vec2,
+    player_safe_radius: f32,
+) -> bool {
+    // 1. World boundary collision check with safety buffer
+    let max_bound = SOLDIER_WORLD_BOUND - 1.5;
+    if pos.x.abs() > max_bound || pos.y.abs() > max_bound {
+        return false;
+    }
+
+    // 2. Safe perimeter around player squad spawn
+    if (pos - player_safe_pos).length_squared() < player_safe_radius * player_safe_radius {
+        return false;
+    }
+
+    // 3. Collision check against all compound buildings (Circle vs AABB)
+    let min_obstacle_dist = soldier_radius + 0.35;
+    let min_obstacle_dist_sq = min_obstacle_dist * min_obstacle_dist;
+
+    for (size, position) in COMPOUND_BUILDINGS {
+        let center = Vec2::new(position.x, position.z);
+        let half_size = Vec2::new(size.x * 0.5, size.z * 0.5);
+        let closest = Vec2::new(
+            pos.x.clamp(center.x - half_size.x, center.x + half_size.x),
+            pos.y.clamp(center.y - half_size.y, center.y + half_size.y),
+        );
+        if (pos - closest).length_squared() < min_obstacle_dist_sq {
+            return false;
+        }
+    }
+
+    // 4. Collision check against all compound low walls (Circle vs AABB)
+    for (size, position) in COMPOUND_LOW_WALLS {
+        let center = Vec2::new(position.x, position.z);
+        let half_size = Vec2::new(size.x * 0.5, size.z * 0.5);
+        let closest = Vec2::new(
+            pos.x.clamp(center.x - half_size.x, center.x + half_size.x),
+            pos.y.clamp(center.y - half_size.y, center.y + half_size.y),
+        );
+        if (pos - closest).length_squared() < min_obstacle_dist_sq {
+            return false;
+        }
+    }
+
+    // 5. Collision check against other spawned soldiers (prevent overlapping)
+    let min_sep_sq = min_separation * min_separation;
+    for &other in existing_spawns {
+        if (pos - other).length_squared() < min_sep_sq {
+            return false;
+        }
+    }
+
+    true
+}
+
+// Dynamically distributes `count` spawn positions across the map without colliding
+// with buildings, walls, player spawn, or each other.
+pub fn generate_dynamic_zombie_spawns(count: usize, seed: u64) -> Vec<Vec2> {
+    let mut rng = SimpleRng::new(seed);
+    let mut spawns = Vec::with_capacity(count);
+
+    let soldier_radius = SOLDIER_RADIUS;
+    let player_safe_pos = Vec2::new(0.0, 48.0);
+    let player_safe_radius = 18.0;
+
+    let mut current_min_separation = 4.5_f32;
+    let absolute_min_separation = soldier_radius * 2.4; // 1.44m (strictly > 2 * SOLDIER_RADIUS)
+
+    let spawn_bounds_x = (-48.0_f32, 48.0_f32);
+    let spawn_bounds_y = (-48.0_f32, 34.0_f32);
+
+    for _ in 0..count {
+        let mut placed = false;
+        let mut attempts = 0;
+
+        while !placed && attempts < 1000 {
+            attempts += 1;
+            let candidate = Vec2::new(
+                rng.range(spawn_bounds_x.0, spawn_bounds_x.1),
+                rng.range(spawn_bounds_y.0, spawn_bounds_y.1),
+            );
+
+            if is_spawn_position_valid(
+                candidate,
+                soldier_radius,
+                &spawns,
+                current_min_separation,
+                player_safe_pos,
+                player_safe_radius,
+            ) {
+                spawns.push(candidate);
+                placed = true;
+            } else if attempts % 80 == 0 && current_min_separation > absolute_min_separation {
+                // If space is tight at high density, gradually relax separation down to physical minimum
+                current_min_separation =
+                    (current_min_separation * 0.88).max(absolute_min_separation);
+            }
+        }
+
+        // Fallback pass if separation constraint wasn't met
+        if !placed {
+            for _ in 0..300 {
+                let candidate = Vec2::new(
+                    rng.range(spawn_bounds_x.0, spawn_bounds_x.1),
+                    rng.range(spawn_bounds_y.0, spawn_bounds_y.1),
+                );
+                if is_spawn_position_valid(
+                    candidate,
+                    soldier_radius,
+                    &spawns,
+                    absolute_min_separation,
+                    player_safe_pos,
+                    player_safe_radius,
+                ) {
+                    spawns.push(candidate);
+                    break;
+                }
+            }
+        }
+    }
+
+    spawns
+}
+
+pub fn setup_zombies(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    count: usize,
+    seed: u64,
+) {
+    let pointer_mesh = meshes.add(Circle::new(0.15));
+    let zombie_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
+
+    // Green circle material for zombies
+    let zombie_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.20, 0.72, 0.28),
+        perceptual_roughness: 0.65,
+        ..default()
+    });
+    let zombie_pointer_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.65, 0.95, 0.65),
+        unlit: true,
+        ..default()
+    });
+
+    let spawns = generate_dynamic_zombie_spawns(count, seed);
+    let mut rng = SimpleRng::new(seed.wrapping_add(101));
+
+    for &pos in &spawns {
+        let angle = rng.range(0.0, std::f32::consts::TAU);
+        let facing = Vec2::new(angle.cos(), angle.sin()).normalize_or_zero();
+        let facing = if facing.length_squared() > 0.01 {
+            facing
+        } else {
+            Vec2::new(0.0, 1.0)
+        };
+        let yaw = f32::atan2(-facing.x, -facing.y);
+
+        let zombie = commands
+            .spawn((
+                LevelEntity,
+                Mesh3d(zombie_mesh.clone()),
+                MeshMaterial3d(zombie_material.clone()),
+                Transform::from_xyz(pos.x, 0.05, pos.y)
+                    .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2)),
+                Visibility::Hidden,
+                Zombie {
+                    wander_dir: facing,
+                    wander_timer: Timer::from_seconds(
+                        2.0 + rng.range(0.0, 3.0),
+                        TimerMode::Repeating,
+                    ),
+                    target_pos: None,
+                    speed: 2.4,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    attack_cooldown: Timer::from_seconds(0.8, TimerMode::Once),
+                },
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(999.0, TimerMode::Once),
+                    speed: 2.4,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    stuck_timer: 0.0,
+                    last_pos: pos,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: facing,
+                    shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
+                    stance: Stance::Standing,
+                },
+            ))
+            .id();
+
+        // Attach direction pointer so player can tell zombie facing direction
+        commands.spawn((
+            Mesh3d(pointer_mesh.clone()),
+            MeshMaterial3d(zombie_pointer_material.clone()),
+            Transform::from_xyz(0.0, 0.42, 0.01),
+            ChildOf(zombie),
+        ));
+
+        // NOTE: No vision cone child attached — zombies have vision cones, but do not render them!
+    }
+}
+
 // Enemy AI: patrols compound, hunts player when spotted in vision cone, takes cover & shoots
 pub fn update_enemy(
     mut commands: Commands,
     time: Res<Time>,
     mut enemy_q: Query<
         (&mut Transform, &mut Enemy, &mut Soldier),
-        (With<Enemy>, Without<Player>, Without<crate::friendly::Friendly>),
+        (
+            With<Enemy>,
+            Without<Zombie>,
+            Without<Player>,
+            Without<crate::friendly::Friendly>,
+        ),
     >,
     player_q: Query<
         &Transform,
-        (With<Player>, Without<Enemy>, Without<crate::friendly::Friendly>),
+        (
+            With<Player>,
+            Without<Enemy>,
+            Without<crate::friendly::Friendly>,
+        ),
     >,
     friendly_q: Query<
         &Transform,
-        (With<crate::friendly::Friendly>, Without<Enemy>, Without<Player>),
+        (
+            With<crate::friendly::Friendly>,
+            Without<Enemy>,
+            Without<Player>,
+        ),
     >,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
@@ -261,7 +566,8 @@ pub fn update_enemy(
                 visible_squad_targets.push((f_pos, (f_pos - enemy_pos).length_squared()));
             }
         }
-        visible_squad_targets.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        visible_squad_targets
+            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let can_see_squad_target = visible_squad_targets.first().map(|(pos, _)| *pos);
 
         // 2. State transitions
@@ -309,8 +615,12 @@ pub fn update_enemy(
                     );
                     let crawl_speed = enemy.speed * 0.32;
                     let next_pos = enemy_pos + move_dir * crawl_speed * dt;
-                    let resolved =
-                        resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
+                    let resolved = resolve_circle_obstacle_collision(
+                        next_pos,
+                        soldier_radius,
+                        &buildings,
+                        &low_walls,
+                    );
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
                 } else if dist > 6.0 {
@@ -325,8 +635,12 @@ pub fn update_enemy(
                         soldier_radius,
                     );
                     let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75) * dt;
-                    let resolved =
-                        resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
+                    let resolved = resolve_circle_obstacle_collision(
+                        next_pos,
+                        soldier_radius,
+                        &buildings,
+                        &low_walls,
+                    );
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
                 } else if near_low_wall || dist > 3.5 {
@@ -382,7 +696,9 @@ pub fn update_enemy(
                         // If taking cover or near a low wall, crouch-walk for tactical cover; otherwise standing advance
                         if near_low_wall {
                             soldier.stance = Stance::Crouching;
-                        } else if soldier.stance != Stance::Crouching && soldier.stance != Stance::Prone {
+                        } else if soldier.stance != Stance::Crouching
+                            && soldier.stance != Stance::Prone
+                        {
                             soldier.stance = Stance::Standing;
                         }
                         let desired_move = to_target / dist;
@@ -400,8 +716,12 @@ pub fn update_enemy(
                             Stance::Prone => enemy.speed * 0.3,
                         };
                         let next_pos = enemy_pos + move_dir * speed * dt;
-                        let resolved =
-                            resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
+                        let resolved = resolve_circle_obstacle_collision(
+                            next_pos,
+                            soldier_radius,
+                            &buildings,
+                            &low_walls,
+                        );
                         tf.translation.x = resolved.x;
                         tf.translation.z = resolved.y;
                     } else {
@@ -453,8 +773,12 @@ pub fn update_enemy(
                     );
                     soldier.facing_dir = move_dir;
                     let next_pos = enemy_pos + move_dir * enemy.speed * dt;
-                    let resolved =
-                        resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
+                    let resolved = resolve_circle_obstacle_collision(
+                        next_pos,
+                        soldier_radius,
+                        &buildings,
+                        &low_walls,
+                    );
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
                 }
@@ -469,6 +793,220 @@ pub fn update_enemy(
             Stance::Crouching => Vec3::splat(0.72),
             Stance::Prone => Vec3::new(0.55, 1.15, 0.55),
         };
+    }
+}
+
+// Zombie AI: wander randomly, slow pursuit on sight or gunfire, never crouch or prone, lethal melee contact
+pub fn update_zombies(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut zombie_q: Query<
+        (&mut Transform, &mut Zombie, &mut Soldier),
+        (
+            With<Zombie>,
+            With<Enemy>,
+            Without<Player>,
+            Without<crate::friendly::Friendly>,
+        ),
+    >,
+    player_q: Query<
+        (Entity, &Transform),
+        (
+            With<Player>,
+            Without<Zombie>,
+            Without<Enemy>,
+            Without<crate::friendly::Friendly>,
+        ),
+    >,
+    friendly_q: Query<
+        (Entity, &Transform),
+        (
+            With<crate::friendly::Friendly>,
+            Without<Zombie>,
+            Without<Enemy>,
+            Without<Player>,
+        ),
+    >,
+    buildings_q: Query<
+        (&Transform, &BuildingCollider),
+        (
+            With<Building>,
+            Without<Zombie>,
+            Without<Player>,
+            Without<Enemy>,
+            Without<crate::friendly::Friendly>,
+        ),
+    >,
+    low_walls_q: Query<
+        (&Transform, &LowWallCollider),
+        (
+            With<LowWall>,
+            Without<Zombie>,
+            Without<Player>,
+            Without<Enemy>,
+            Without<crate::friendly::Friendly>,
+        ),
+    >,
+    corpse_assets: Res<crate::combat::bullet::CorpseAssets>,
+    mut gunshot_reader: MessageReader<GunshotEvent>,
+) {
+    let dt = time.delta_secs();
+    let soldier_radius = SOLDIER_RADIUS;
+    let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+    let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
+
+    // Squad targets (Player + living Friendlies)
+    let mut squad_targets: Vec<(Entity, Vec2)> = Vec::new();
+    for (p_ent, p_tf) in &player_q {
+        squad_targets.push((p_ent, Vec2::new(p_tf.translation.x, p_tf.translation.z)));
+    }
+    for (f_ent, f_tf) in &friendly_q {
+        squad_targets.push((f_ent, Vec2::new(f_tf.translation.x, f_tf.translation.z)));
+    }
+
+    let heard_gunshots: Vec<GunshotEvent> = gunshot_reader.read().copied().collect();
+
+    for (mut tf, mut zombie, mut soldier) in &mut zombie_q {
+        zombie.wander_timer.tick(time.delta());
+        zombie.attack_cooldown.tick(time.delta());
+
+        // Zombies NEVER crouch or go prone
+        soldier.stance = Stance::Standing;
+
+        let zombie_pos = Vec2::new(tf.translation.x, tf.translation.z);
+
+        // 1. Vision: check if any squad member is inside zombie's vision cone and line-of-sight
+        let mut visible_squad: Vec<(Vec2, f32)> = Vec::new();
+        for (_, s_pos) in &squad_targets {
+            if can_see_target(
+                zombie_pos,
+                soldier.facing_dir,
+                *s_pos,
+                zombie.vision_range,
+                zombie.vision_half_angle,
+                zombie.inner_radius,
+                &buildings,
+            ) {
+                visible_squad.push((*s_pos, (*s_pos - zombie_pos).length_squared()));
+            }
+        }
+        visible_squad.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some(&(closest_squad_pos, _)) = visible_squad.first() {
+            // Spotted squad member: alert and chase target
+            zombie.target_pos = Some(closest_squad_pos);
+        } else if zombie.target_pos.is_none() {
+            // 2. Hearing: check if nearby gunfire from player team occurred
+            for event in &heard_gunshots {
+                if event.shooter_team == Team::Player {
+                    let to_gunshot = event.position - zombie_pos;
+                    let dist = to_gunshot.length();
+                    if dist <= 55.0 && dist > 0.1 {
+                        zombie.target_pos = Some(event.position);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Movement
+        if let Some(target) = zombie.target_pos {
+            let to_target = target - zombie_pos;
+            let dist = to_target.length();
+
+            if dist > 0.7 {
+                let desired_move = to_target / dist;
+                let move_dir = find_avoidance_direction(
+                    zombie_pos,
+                    desired_move,
+                    &buildings,
+                    &low_walls,
+                    soldier_radius,
+                );
+                soldier.facing_dir = move_dir;
+                let next_pos = zombie_pos + move_dir * zombie.speed * dt;
+                let resolved = resolve_circle_obstacle_collision(
+                    next_pos,
+                    soldier_radius,
+                    &buildings,
+                    &low_walls,
+                );
+                tf.translation.x = resolved.x;
+                tf.translation.z = resolved.y;
+            } else {
+                // Reached target position with no target in sight: return to random wander
+                zombie.target_pos = None;
+                zombie.wander_timer.reset();
+            }
+        } else {
+            // Wandering randomly
+            if zombie.wander_timer.is_finished() {
+                zombie.wander_timer.reset();
+                let seed =
+                    time.elapsed_secs() * 11.3 + tf.translation.x * 2.7 + tf.translation.z * 5.9;
+                let angle = seed.sin() * std::f32::consts::PI;
+                zombie.wander_dir = Vec2::new(angle.cos(), angle.sin()).normalize_or_zero();
+                if zombie.wander_dir.length_squared() < 0.01 {
+                    zombie.wander_dir = Vec2::new(0.0, 1.0);
+                }
+            }
+
+            let move_dir = find_avoidance_direction(
+                zombie_pos,
+                zombie.wander_dir,
+                &buildings,
+                &low_walls,
+                soldier_radius,
+            );
+            soldier.facing_dir = move_dir;
+            let wander_speed = zombie.speed * 0.65;
+            let next_pos = zombie_pos + move_dir * wander_speed * dt;
+            let resolved =
+                resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
+            tf.translation.x = resolved.x;
+            tf.translation.z = resolved.y;
+        }
+
+        // 4. Melee contact attack on player squad
+        if zombie.attack_cooldown.is_finished() {
+            for &(s_ent, s_pos) in &squad_targets {
+                if (s_pos - zombie_pos).length() < 1.05 {
+                    zombie.attack_cooldown.reset();
+
+                    // Lethal melee strike: convert victim soldier to corpse with blood pool
+                    let mut entity_cmds = commands.entity(s_ent);
+                    entity_cmds.despawn_children();
+                    entity_cmds
+                        .remove::<Soldier>()
+                        .remove::<Team>()
+                        .remove::<Player>()
+                        .remove::<crate::friendly::Friendly>()
+                        .insert((
+                            crate::common::types::Corpse,
+                            Visibility::Inherited,
+                            Transform::from_xyz(s_pos.x, 0.03, s_pos.y)
+                                .with_scale(Vec3::new(0.65, 0.95, 0.65)),
+                            MeshMaterial3d(corpse_assets.player_corpse_material.clone()),
+                        ));
+
+                    // Blood pool
+                    commands.spawn((
+                        LevelEntity,
+                        Mesh3d(corpse_assets.blood_pool_mesh.clone()),
+                        MeshMaterial3d(corpse_assets.blood_material.clone()),
+                        Transform::from_xyz(s_pos.x, 0.015, s_pos.y)
+                            .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                        crate::common::types::BloodDecal,
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // Visual orientation
+        let yaw = f32::atan2(-soldier.facing_dir.x, -soldier.facing_dir.y);
+        tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
+        tf.scale = Vec3::ONE; // Always standing silhouette
     }
 }
 
@@ -791,5 +1329,249 @@ mod tests {
         assert_eq!(enemy.state, EnemyAiState::Search);
         assert_eq!(soldier.stance, Stance::Standing);
     }
-}
 
+    #[test]
+    fn test_setup_zombies_spawns_20_zombies_without_cone_meshes() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.insert_resource(CurrentLevel::Level2);
+
+        app.add_systems(Update, setup_enemy);
+        app.update();
+
+        let mut zombie_count = 0;
+
+        let mut zombie_q = app
+            .world_mut()
+            .query::<(Entity, &Zombie, &Soldier, &Enemy)>();
+        for (z_entity, _, soldier, _) in zombie_q.iter(app.world()) {
+            zombie_count += 1;
+            assert_eq!(soldier.stance, Stance::Standing);
+
+            // Verify children: must NOT have a vision cone mesh
+            // Vision cone meshes are identified by not being pointer circles (radius != 0.15)
+            // or by checking the number of children (only 1 child: the direction pointer)
+            let children = app.world().get::<Children>(z_entity);
+            if let Some(children) = children {
+                // Should only have 1 child (pointer) and NOT 2 children (pointer + cone)
+                assert_eq!(
+                    children.len(),
+                    1,
+                    "Zombie should have exactly 1 child (pointer), but found {}",
+                    children.len()
+                );
+            }
+        }
+
+        assert_eq!(zombie_count, 20, "Level 2 must spawn exactly 20 zombies");
+    }
+
+    #[test]
+    fn test_zombie_hears_gunfire_and_pursues_without_crouching() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let blood_pool_mesh = meshes.add(Circle::new(0.85));
+        let blood_splatter_mesh = meshes.add(Circle::new(0.22));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let blood_mat = materials.add(Color::srgb(0.5, 0.0, 0.0));
+        let corpse_mat = materials.add(Color::srgb(0.3, 0.3, 0.3));
+        app.insert_resource(crate::combat::bullet::CorpseAssets {
+            blood_pool_mesh,
+            blood_splatter_mesh,
+            blood_material: blood_mat,
+            player_corpse_material: corpse_mat.clone(),
+            enemy_corpse_material: corpse_mat,
+        });
+
+        // Spawn zombie at (0.0, 0.0) facing North (0.0, -1.0)
+        let zombie_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Zombie {
+                    wander_dir: Vec2::new(0.0, -1.0),
+                    wander_timer: Timer::from_seconds(3.0, TimerMode::Repeating),
+                    target_pos: None,
+                    speed: 2.4,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    attack_cooldown: Timer::from_seconds(0.8, TimerMode::Once),
+                },
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(999.0, TimerMode::Once),
+                    speed: 2.4,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
+                    stance: Stance::Standing,
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_zombies);
+
+        // Advance time delta to 0.1s
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(100));
+
+        // Player fires gun at South (0.0, 20.0)
+        app.world_mut().write_message(GunshotEvent {
+            position: Vec2::new(0.0, 20.0),
+            shooter_team: Team::Player,
+        });
+
+        app.update();
+
+        let zombie = app.world().get::<Zombie>(zombie_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(zombie_entity).unwrap();
+        let tf = app.world().get::<Transform>(zombie_entity).unwrap();
+
+        // Zombie heard gunshot, set target_pos
+        assert_eq!(zombie.target_pos, Some(Vec2::new(0.0, 20.0)));
+        // Zombie never crouches or goes prone
+        assert_eq!(soldier.stance, Stance::Standing);
+        // Zombie faced towards gunfire (South)
+        assert!(
+            soldier.facing_dir.y > 0.9,
+            "Zombie should turn South toward gunshot"
+        );
+        // Zombie moved toward gunshot
+        assert!(tf.translation.z > 0.0, "Zombie should move toward target");
+    }
+
+    #[test]
+    fn test_dynamic_zombie_spawns_have_no_collisions() {
+        let count = 25;
+        let seed = 12345;
+        let spawns = generate_dynamic_zombie_spawns(count, seed);
+
+        assert_eq!(
+            spawns.len(),
+            count,
+            "Should generate requested number of spawns"
+        );
+
+        let soldier_radius = SOLDIER_RADIUS;
+        let min_sep = soldier_radius * 2.0;
+
+        for (i, &pos) in spawns.iter().enumerate() {
+            // Must be within world bounds
+            assert!(
+                pos.x.abs() <= SOLDIER_WORLD_BOUND,
+                "Spawn {} ({:?}) out of world bounds X",
+                i,
+                pos
+            );
+            assert!(
+                pos.y.abs() <= SOLDIER_WORLD_BOUND,
+                "Spawn {} ({:?}) out of world bounds Y",
+                i,
+                pos
+            );
+
+            // Safe from player spawn at (0, 48)
+            let to_player = pos - Vec2::new(0.0, 48.0);
+            assert!(
+                to_player.length() >= 18.0,
+                "Spawn {} ({:?}) too close to player spawn",
+                i,
+                pos
+            );
+
+            // Must not penetrate any building
+            for (b_idx, (size, b_pos)) in COMPOUND_BUILDINGS.iter().enumerate() {
+                let center = Vec2::new(b_pos.x, b_pos.z);
+                let half_size = Vec2::new(size.x * 0.5, size.z * 0.5);
+                let closest = Vec2::new(
+                    pos.x.clamp(center.x - half_size.x, center.x + half_size.x),
+                    pos.y.clamp(center.y - half_size.y, center.y + half_size.y),
+                );
+                let dist = (pos - closest).length();
+                assert!(
+                    dist >= soldier_radius,
+                    "Spawn {} ({:?}) penetrates building {} (center: {:?}, half_size: {:?}, dist: {})",
+                    i,
+                    pos,
+                    b_idx,
+                    center,
+                    half_size,
+                    dist
+                );
+            }
+
+            // Must not penetrate any low wall
+            for (w_idx, (size, w_pos)) in COMPOUND_LOW_WALLS.iter().enumerate() {
+                let center = Vec2::new(w_pos.x, w_pos.z);
+                let half_size = Vec2::new(size.x * 0.5, size.z * 0.5);
+                let closest = Vec2::new(
+                    pos.x.clamp(center.x - half_size.x, center.x + half_size.x),
+                    pos.y.clamp(center.y - half_size.y, center.y + half_size.y),
+                );
+                let dist = (pos - closest).length();
+                assert!(
+                    dist >= soldier_radius,
+                    "Spawn {} ({:?}) penetrates low wall {} (dist: {})",
+                    i,
+                    pos,
+                    w_idx,
+                    dist
+                );
+            }
+
+            // Must not overlap with any other spawned zombie
+            for (j, &other) in spawns.iter().enumerate() {
+                if i != j {
+                    let sep = (pos - other).length();
+                    assert!(
+                        sep >= min_sep,
+                        "Spawn {} ({:?}) and spawn {} ({:?}) collide (dist: {} < min: {})",
+                        i,
+                        pos,
+                        j,
+                        other,
+                        sep,
+                        min_sep
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_custom_zombie_spawn_count_via_config() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.insert_resource(CurrentLevel::Level2);
+        app.insert_resource(ZombieSpawnConfig { count: 32 });
+
+        app.add_systems(Update, setup_enemy);
+        app.update();
+
+        let zombie_count = app
+            .world_mut()
+            .query::<(&Zombie, &Soldier, &Enemy)>()
+            .iter(app.world())
+            .count();
+
+        assert_eq!(zombie_count, 32, "Should spawn 32 zombies as configured");
+    }
+}

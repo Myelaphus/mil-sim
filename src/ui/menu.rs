@@ -1,13 +1,16 @@
-use bevy::prelude::*;
-use crate::common::types::{AppState, LevelEntity};
+use crate::common::types::{AppState, CurrentLevel, LevelEntity};
 use crate::enemy::ai::Enemy;
 use crate::player::Player;
+use bevy::prelude::*;
 
 #[derive(Component)]
 pub struct MainMenuRoot;
 
 #[derive(Component)]
 pub struct TestLevel1Button;
+
+#[derive(Component)]
+pub struct TestLevel2Button;
 
 #[derive(Component)]
 pub struct LevelOutcomeBanner;
@@ -104,7 +107,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                             TestLevel1Button,
                             Node {
                                 width: Val::Px(360.0),
-                                height: Val::Px(64.0),
+                                height: Val::Px(56.0),
                                 justify_content: JustifyContent::Center,
                                 align_items: AlignItems::Center,
                                 border: UiRect::all(Val::Px(1.5)),
@@ -118,7 +121,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                             btn.spawn((
                                 Text::new("▶  test_level_1"),
                                 TextFont {
-                                    font_size: FontSize::Px(22.0),
+                                    font_size: FontSize::Px(20.0),
                                     ..default()
                                 },
                                 TextColor(Color::srgb(1.0, 1.0, 1.0)),
@@ -126,12 +129,50 @@ pub fn setup_main_menu(mut commands: Commands) {
                         });
 
                     section.spawn((
-                        Text::new("Compound Infiltration • 3-Man Squad • 5 Hostile Guards"),
+                        Text::new("Compound Infiltration • 3-Man Squad vs 5 Armed Guards"),
                         TextFont {
                             font_size: FontSize::Px(12.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.48, 0.56, 0.64)),
+                    ));
+
+                    // Button: test_level_2 (Zombies)
+                    section
+                        .spawn((
+                            Button,
+                            TestLevel2Button,
+                            Node {
+                                width: Val::Px(360.0),
+                                height: Val::Px(56.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border: UiRect::all(Val::Px(1.5)),
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                margin: UiRect::top(Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(BUTTON_NORMAL),
+                            BorderColor::all(Color::srgb(0.25, 0.45, 0.30)),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("▶  test_level_2"),
+                                TextFont {
+                                    font_size: FontSize::Px(20.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.45, 0.95, 0.50)),
+                            ));
+                        });
+
+                    section.spawn((
+                        Text::new("Zombie Infestation • 3-Man Squad vs Zombies"),
+                        TextFont {
+                            font_size: FontSize::Px(12.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.40, 0.65, 0.45)),
                     ));
                 });
 
@@ -193,19 +234,29 @@ pub fn setup_main_menu(mut commands: Commands) {
         });
 }
 
-// Handles mouse interactions on the test_level_1 button
+// Handles mouse interactions on the level selection buttons
 pub fn update_main_menu_interactions(
     mut next_state: ResMut<NextState<AppState>>,
-    mut interaction_q: Query<
+    mut current_level: ResMut<CurrentLevel>,
+    mut level1_q: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
         (Changed<Interaction>, With<TestLevel1Button>),
     >,
+    mut level2_q: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (
+            Changed<Interaction>,
+            With<TestLevel2Button>,
+            Without<TestLevel1Button>,
+        ),
+    >,
 ) {
-    for (interaction, mut bg_color, mut border_color) in &mut interaction_q {
+    for (interaction, mut bg_color, mut border_color) in &mut level1_q {
         match *interaction {
             Interaction::Pressed => {
                 *bg_color = BUTTON_PRESSED.into();
                 *border_color = BorderColor::all(Color::srgb(0.4, 0.8, 1.0));
+                *current_level = CurrentLevel::Level1;
                 next_state.set(AppState::InGame);
             }
             Interaction::Hovered => {
@@ -215,6 +266,25 @@ pub fn update_main_menu_interactions(
             Interaction::None => {
                 *bg_color = BUTTON_NORMAL.into();
                 *border_color = BorderColor::all(Color::srgb(0.25, 0.38, 0.52));
+            }
+        }
+    }
+
+    for (interaction, mut bg_color, mut border_color) in &mut level2_q {
+        match *interaction {
+            Interaction::Pressed => {
+                *bg_color = Color::srgb(0.18, 0.55, 0.28).into();
+                *border_color = BorderColor::all(Color::srgb(0.45, 0.95, 0.50));
+                *current_level = CurrentLevel::Level2;
+                next_state.set(AppState::InGame);
+            }
+            Interaction::Hovered => {
+                *bg_color = Color::srgb(0.18, 0.32, 0.22).into();
+                *border_color = BorderColor::all(Color::srgb(0.35, 0.65, 0.40));
+            }
+            Interaction::None => {
+                *bg_color = BUTTON_NORMAL.into();
+                *border_color = BorderColor::all(Color::srgb(0.25, 0.45, 0.30));
             }
         }
     }
@@ -289,12 +359,7 @@ pub fn check_level_end_conditions(
     }
 }
 
-fn spawn_outcome_banner(
-    commands: &mut Commands,
-    title: &str,
-    subtitle: &str,
-    accent_color: Color,
-) {
+fn spawn_outcome_banner(commands: &mut Commands, title: &str, subtitle: &str, accent_color: Color) {
     commands
         .spawn((
             LevelOutcomeBanner,
@@ -358,6 +423,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(bevy::state::app::StatesPlugin);
         app.init_state::<AppState>();
+        app.init_resource::<CurrentLevel>();
 
         let button_entity = app
             .world_mut()
@@ -377,8 +443,43 @@ mod tests {
         let state = app.world().resource::<State<AppState>>();
         assert_eq!(*state.get(), AppState::InGame);
 
+        let current_lvl = app.world().resource::<CurrentLevel>();
+        assert_eq!(*current_lvl, CurrentLevel::Level1);
+
         let bg_color = app.world().get::<BackgroundColor>(button_entity).unwrap();
         assert_eq!(bg_color.0, BUTTON_PRESSED);
+    }
+
+    #[test]
+    fn test_menu_button_interaction_launches_level_2() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<CurrentLevel>();
+
+        let button_entity = app
+            .world_mut()
+            .spawn((
+                Button,
+                TestLevel2Button,
+                Interaction::Pressed,
+                BackgroundColor(BUTTON_NORMAL),
+                BorderColor::all(Color::srgb(0.2, 0.3, 0.4)),
+            ))
+            .id();
+
+        app.add_systems(Update, update_main_menu_interactions);
+        app.update(); // Processes interaction, sets next_state
+        app.update(); // Applies StateTransition schedule
+
+        let state = app.world().resource::<State<AppState>>();
+        assert_eq!(*state.get(), AppState::InGame);
+
+        let current_lvl = app.world().resource::<CurrentLevel>();
+        assert_eq!(*current_lvl, CurrentLevel::Level2);
+
+        let bg_color = app.world().get::<BackgroundColor>(button_entity).unwrap();
+        assert_eq!(bg_color.0, Color::srgb(0.18, 0.55, 0.28));
     }
 
     #[test]
@@ -437,10 +538,8 @@ mod tests {
         app.init_resource::<LevelEndManager>();
 
         // Spawn living player, but NO enemies
-        app.world_mut().spawn((
-            Player,
-            Transform::from_xyz(0.0, 0.05, 48.0),
-        ));
+        app.world_mut()
+            .spawn((Player, Transform::from_xyz(0.0, 0.05, 48.0)));
 
         app.add_systems(Update, check_level_end_conditions);
 

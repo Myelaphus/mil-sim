@@ -14,7 +14,8 @@ impl Plugin for EnemyPlugin {
         app.add_systems(OnEnter(AppState::InGame), setup_enemy)
             .add_systems(
                 Update,
-                (update_enemy, update_enemy_visibility).run_if(in_state(AppState::InGame)),
+                (update_enemy, update_zombies, update_enemy_visibility)
+                    .run_if(in_state(AppState::InGame)),
             );
     }
 }

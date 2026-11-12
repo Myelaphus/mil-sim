@@ -33,3 +33,15 @@ pub struct Enemy {
     pub last_pos: Vec2,
 }
 
+#[derive(Component)]
+pub struct Zombie {
+    pub wander_dir: Vec2,
+    pub wander_timer: Timer,
+    pub target_pos: Option<Vec2>,
+    pub speed: f32,
+    pub vision_range: f32,
+    pub vision_half_angle: f32,
+    pub inner_radius: f32,
+    pub attack_cooldown: Timer,
+}
+

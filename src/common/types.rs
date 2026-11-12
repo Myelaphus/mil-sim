@@ -17,6 +17,13 @@ pub enum AppState {
     InGame,
 }
 
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CurrentLevel {
+    #[default]
+    Level1,
+    Level2,
+}
+
 #[derive(Component)]
 pub struct LevelEntity;
 
