@@ -12,7 +12,7 @@ use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollid
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
-// Spawns 2 friendly squad members flanking the player in a wedge formation
+// Spawns 3 friendly fire team members flanking and trailing the player in a tactical wedge formation
 pub fn setup_friendly(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -21,7 +21,7 @@ pub fn setup_friendly(
     let pointer_mesh = meshes.add(Circle::new(0.15));
     let friendly_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
 
-    // Friendly soldiers: tactical squad teal/blue color
+    // Friendly soldiers: tactical fire team teal/blue color
     let friendly_soldier_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.18, 0.68, 0.88),
         perceptual_roughness: 0.5,
@@ -44,7 +44,7 @@ pub fn setup_friendly(
         ..default()
     });
 
-    // Spawn 2 friendlies flanking player's starting gate position (0.0, 48.0)
+    // Spawn 3 friendlies flanking and trailing player's starting gate position (0.0, 48.0)
     let friendly_configs = [
         // Left wingman: slot 0, offset (-2.4, 2.2) behind-left
         (
@@ -54,6 +54,8 @@ pub fn setup_friendly(
         ),
         // Right wingman: slot 1, offset (2.4, 2.2) behind-right
         (Vec2::new(2.4, 50.2), Vec2::new(0.35, -0.94).normalize(), 1),
+        // Rear guard / trail: slot 2, offset (0.0, 4.0) behind, facing South (rear security)
+        (Vec2::new(0.0, 52.0), Vec2::new(0.0, 1.0), 2),
     ];
 
     for (pos, facing, slot) in friendly_configs {
@@ -107,7 +109,7 @@ pub fn setup_friendly(
     }
 }
 
-// Friendly squad AI: follows player in tactical wedge formation, scans flanks,
+// Friendly fire team AI: follows player in tactical wedge formation, scans flanks and rear,
 // takes cover behind low walls, and engages visible enemies with coordinated fire.
 pub fn update_friendly(
     mut commands: Commands,
@@ -279,16 +281,17 @@ pub fn update_friendly(
                     // Right vector perpendicular to player's facing direction
                     let right = Vec2::new(-p_facing.y, p_facing.x);
 
-                    // Wedge formation offset:
-                    // Slot 0 (Left flank): -2.4m right (left), -2.0m facing (behind)
-                    // Slot 1 (Right flank): +2.4m right, -2.0m facing (behind)
-                    let (lateral_offset, flank_angle) = if friendly.slot == 0 {
-                        (-2.4, -35.0_f32.to_radians())
-                    } else {
-                        (2.4, 35.0_f32.to_radians())
+                    // Fire team formation offset:
+                    // Slot 0 (Left flank): -2.4m right (left), 2.0m behind, -35° angle
+                    // Slot 1 (Right flank): +2.4m right, 2.0m behind, +35° angle
+                    // Slot 2 (Rear guard / trail): 0.0m right, 4.0m behind, 180° angle (covers rear)
+                    let (lateral_offset, behind_offset, flank_angle) = match friendly.slot {
+                        0 => (-2.4, 2.0, -35.0_f32.to_radians()),
+                        1 => (2.4, 2.0, 35.0_f32.to_radians()),
+                        _ => (0.0, 4.0, 180.0_f32.to_radians()),
                     };
 
-                    let formation_spot = p_pos + right * lateral_offset - p_facing * 2.0;
+                    let formation_spot = p_pos + right * lateral_offset - p_facing * behind_offset;
 
                     // Flank guard facing direction (rotates player facing direction by flank angle)
                     let cos_a = flank_angle.cos();
@@ -772,5 +775,95 @@ mod tests {
         // Reloaded to 30 rounds, and immediately resumed combat by firing 1 round
         assert_eq!(soldier.ammo.current_mag, 29);
         assert_eq!(soldier.ammo.reserve_mags, 5);
+    }
+
+    #[test]
+    fn test_setup_friendly_spawns_three_fireteam_members() {
+        let mut app = create_test_app();
+        app.add_systems(Update, setup_friendly);
+        app.update();
+
+        let friendlies: Vec<(&Friendly, &Soldier, &Transform)> = app
+            .world_mut()
+            .query::<(&Friendly, &Soldier, &Transform)>()
+            .iter(app.world())
+            .collect();
+
+        // 3 friendly members spawned (completing 4-man fire team with player)
+        assert_eq!(
+            friendlies.len(),
+            3,
+            "Fire team must spawn exactly 3 friendly members"
+        );
+
+        let mut slots: Vec<usize> = friendlies.iter().map(|(f, _, _)| f.slot).collect();
+        slots.sort();
+        assert_eq!(slots, vec![0, 1, 2]);
+
+        // Slot 2 must be positioned behind and facing rear for rear security
+        let slot2 = friendlies.iter().find(|(f, _, _)| f.slot == 2).unwrap();
+        assert_eq!(slot2.2.translation.x, 0.0);
+        assert_eq!(slot2.2.translation.z, 52.0);
+        assert!(
+            slot2.1.facing_dir.y > 0.9,
+            "Slot 2 must face South for rear security"
+        );
+    }
+
+    #[test]
+    fn test_friendly_slot_2_provides_rear_security_in_formation() {
+        let mut app = create_test_app();
+
+        // Spawn player at (0, 0) facing North (0, -1)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 0.0),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                ammo: crate::common::types::WeaponAmmo::default(),
+            },
+        ));
+
+        // Spawn friendly slot 2 already near its formation spot (0.0, 4.0)
+        let friendly_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 4.1),
+                Friendly {
+                    slot: 2, // Rear guard
+                    state: FriendlyAiState::Follow,
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.6,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    target_pos: None,
+                    target_lost_timer: 0.0,
+                },
+                Team::Player,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0), // Facing rear
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_friendly);
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(50));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(friendly_entity).unwrap();
+        // Since player faces North (0, -1), rear guard facing must be South (0, 1)
+        assert!(
+            soldier.facing_dir.y > 0.9,
+            "Slot 2 must hold rear guard facing (South), was: {:?}",
+            soldier.facing_dir
+        );
     }
 }

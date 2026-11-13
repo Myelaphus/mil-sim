@@ -190,7 +190,7 @@ pub fn is_spawn_position_valid(
         return false;
     }
 
-    // 2. Safe perimeter around player squad spawn
+    // 2. Safe perimeter around player fire team spawn
     if (pos - player_safe_pos).length_squared() < player_safe_radius * player_safe_radius {
         return false;
     }
@@ -545,8 +545,8 @@ pub fn update_enemy(
             }
         }
 
-        // 1. Check if the enemy can see any squad member (player or friendly)
-        let mut visible_squad_targets: Vec<(Vec2, f32)> = Vec::new();
+        // 1. Check if the enemy can see any fire team member (player or friendly)
+        let mut visible_fireteam_targets: Vec<(Vec2, f32)> = Vec::new();
         if let Some(target) = player_pos {
             if can_see_target(
                 enemy_pos,
@@ -557,7 +557,7 @@ pub fn update_enemy(
                 enemy.inner_radius,
                 &buildings,
             ) {
-                visible_squad_targets.push((target, (target - enemy_pos).length_squared()));
+                visible_fireteam_targets.push((target, (target - enemy_pos).length_squared()));
             }
         }
         for f_tf in &friendly_q {
@@ -571,24 +571,24 @@ pub fn update_enemy(
                 enemy.inner_radius,
                 &buildings,
             ) {
-                visible_squad_targets.push((f_pos, (f_pos - enemy_pos).length_squared()));
+                visible_fireteam_targets.push((f_pos, (f_pos - enemy_pos).length_squared()));
             }
         }
-        visible_squad_targets
+        visible_fireteam_targets
             .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let can_see_squad_target = visible_squad_targets.first().map(|(pos, _)| *pos);
+        let can_see_fireteam_target = visible_fireteam_targets.first().map(|(pos, _)| *pos);
 
         // 2. State transitions
-        if let Some(target) = can_see_squad_target {
+        if let Some(target) = can_see_fireteam_target {
             if enemy.state != EnemyAiState::Engage {
-                // Just acquired target: reset shoot timer so squad gets a reaction delay
+                // Just acquired target: reset shoot timer so fire team gets a reaction delay
                 enemy.shoot_timer.reset();
             }
             enemy.state = EnemyAiState::Engage;
             enemy.last_known_player_pos = Some(target);
             enemy.investigate_timer.reset();
         } else if enemy.state == EnemyAiState::Engage {
-            // Lost sight of squad target - switch to investigating last known location
+            // Lost sight of fire team target - switch to investigating last known location
             enemy.state = EnemyAiState::Investigate;
             enemy.investigate_timer.reset();
         }
@@ -873,17 +873,17 @@ pub fn update_zombies(
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
 
-    // Squad targets (Player + living Friendlies)
-    let mut squad_targets: Vec<(Entity, Vec2, Quat)> = Vec::new();
+    // Fire team targets (Player + living Friendlies)
+    let mut fireteam_targets: Vec<(Entity, Vec2, Quat)> = Vec::new();
     for (p_ent, p_tf) in &player_q {
-        squad_targets.push((
+        fireteam_targets.push((
             p_ent,
             Vec2::new(p_tf.translation.x, p_tf.translation.z),
             p_tf.rotation,
         ));
     }
     for (f_ent, f_tf) in &friendly_q {
-        squad_targets.push((
+        fireteam_targets.push((
             f_ent,
             Vec2::new(f_tf.translation.x, f_tf.translation.z),
             f_tf.rotation,
@@ -901,9 +901,9 @@ pub fn update_zombies(
 
         let zombie_pos = Vec2::new(tf.translation.x, tf.translation.z);
 
-        // 1. Vision: check if any squad member is inside zombie's vision cone and line-of-sight
-        let mut visible_squad: Vec<(Vec2, f32)> = Vec::new();
-        for (_, s_pos, _) in &squad_targets {
+        // 1. Vision: check if any fire team member is inside zombie's vision cone and line-of-sight
+        let mut visible_fireteam: Vec<(Vec2, f32)> = Vec::new();
+        for (_, s_pos, _) in &fireteam_targets {
             if can_see_target(
                 zombie_pos,
                 soldier.facing_dir,
@@ -913,14 +913,14 @@ pub fn update_zombies(
                 zombie.inner_radius,
                 &buildings,
             ) {
-                visible_squad.push((*s_pos, (*s_pos - zombie_pos).length_squared()));
+                visible_fireteam.push((*s_pos, (*s_pos - zombie_pos).length_squared()));
             }
         }
-        visible_squad.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        visible_fireteam.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        if let Some(&(closest_squad_pos, _)) = visible_squad.first() {
-            // Spotted squad member: alert and chase target
-            zombie.target_pos = Some(closest_squad_pos);
+        if let Some(&(closest_fireteam_pos, _)) = visible_fireteam.first() {
+            // Spotted fire team member: alert and chase target
+            zombie.target_pos = Some(closest_fireteam_pos);
         } else if zombie.target_pos.is_none() {
             // 2. Hearing: check if nearby gunfire from player team occurred
             for event in &heard_gunshots {
@@ -995,13 +995,13 @@ pub fn update_zombies(
             tf.translation.z = resolved.y;
         }
 
-        // 4. Melee contact attack on player squad
+        // 4. Melee contact attack on player fire team
         let melee_reach = soldier_radius * 2.0 + 0.35; // 1.55m (pairwise collision pushes to ~1.20m)
         let melee_reach_sq = melee_reach * melee_reach;
 
         if zombie.attack_cooldown.is_finished() {
             let mut victim_idx = None;
-            for (idx, &(s_ent, s_pos, s_rot)) in squad_targets.iter().enumerate() {
+            for (idx, &(s_ent, s_pos, s_rot)) in fireteam_targets.iter().enumerate() {
                 if (s_pos - zombie_pos).length_squared() <= melee_reach_sq {
                     zombie.attack_cooldown.reset();
                     zombie.target_pos = None;
@@ -1051,7 +1051,7 @@ pub fn update_zombies(
                 }
             }
             if let Some(idx) = victim_idx {
-                squad_targets.swap_remove(idx);
+                fireteam_targets.swap_remove(idx);
             }
         }
 

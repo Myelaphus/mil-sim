@@ -6,7 +6,7 @@ use crate::friendly::Friendly;
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider};
 
-// Dynamically sets enemy visibility based on squad vision cones (player & living friendlies)
+// Dynamically sets enemy visibility based on fire team vision cones (player & living friendlies)
 pub fn update_enemy_visibility(
     player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Enemy>, Without<Friendly>)>,
     friendly_q: Query<(&Transform, &Soldier), (With<Friendly>, Without<Enemy>, Without<Player>)>,
@@ -26,7 +26,7 @@ pub fn update_enemy_visibility(
 ) {
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
 
-    // Collect all squad spotters (player and friendlies)
+    // Collect all fire team spotters (player and friendlies)
     let mut spotters: Vec<(Vec2, Vec2, f32)> = Vec::new();
 
     if let Ok((p_tf, p_soldier)) = player_q.single() {
@@ -46,7 +46,7 @@ pub fn update_enemy_visibility(
     }
 
     if spotters.is_empty() {
-        // Squad eliminated: enemies remain hidden
+        // Fire team eliminated: enemies remain hidden
         for (_, mut vis) in &mut enemy_q {
             *vis = Visibility::Hidden;
         }
@@ -56,7 +56,7 @@ pub fn update_enemy_visibility(
     for (enemy_tf, mut vis) in &mut enemy_q {
         let enemy_pos = Vec2::new(enemy_tf.translation.x, enemy_tf.translation.z);
 
-        // Visible if ANY squad member has line-of-sight in their vision cone
+        // Visible if ANY fire team member has line-of-sight in their vision cone
         let spotted = spotters.iter().any(|(pos, dir, range)| {
             can_see_target(
                 *pos,
