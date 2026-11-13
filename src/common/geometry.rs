@@ -120,6 +120,25 @@ pub fn resolve_circle_circle_collision(
     pos
 }
 
+// Directional movement speed multiplier:
+// Moving forward (in the direction currently facing) is 100% normal speed.
+// Moving laterally (perpendicular / strafing) or backwards is 50% normal speed.
+// Smoothly interpolates between 1.0 (forward) and 0.5 (lateral/backwards).
+pub fn directional_speed_multiplier(facing_dir: Vec2, move_dir: Vec2) -> f32 {
+    let facing_sq = facing_dir.length_squared();
+    let move_sq = move_dir.length_squared();
+    if facing_sq < 0.0001 || move_sq < 0.0001 {
+        return 1.0;
+    }
+
+    let dot = (facing_dir.dot(move_dir) / (facing_sq.sqrt() * move_sq.sqrt())).clamp(-1.0, 1.0);
+    if dot > 0.0 {
+        0.5 + 0.5 * dot
+    } else {
+        0.5
+    }
+}
+
 // Pairwise collision resolution system ensuring soldiers cannot occupy the same point in space
 pub fn resolve_soldier_pairwise_collisions(
     mut soldiers_q: Query<(Entity, &mut Transform), With<crate::common::types::Soldier>>,
@@ -568,6 +587,42 @@ mod tests {
         let resolved_oob = resolve_circle_obstacle_collision(out_of_bounds, SOLDIER_RADIUS, &[], &[]);
         assert_eq!(resolved_oob.x, SOLDIER_WORLD_BOUND);
         assert_eq!(resolved_oob.y, -SOLDIER_WORLD_BOUND);
+    }
+
+    #[test]
+    fn test_directional_speed_multiplier() {
+        let facing = Vec2::new(0.0, -1.0); // Facing North
+
+        // 1. Moving forward (same direction) -> 100% normal speed
+        let forward = Vec2::new(0.0, -1.0);
+        let mult = directional_speed_multiplier(facing, forward);
+        assert!((mult - 1.0).abs() < 0.001, "Forward multiplier should be 1.0, got {}", mult);
+
+        // 2. Moving laterally right (perpendicular East) -> 50% normal speed
+        let right = Vec2::new(1.0, 0.0);
+        let mult = directional_speed_multiplier(facing, right);
+        assert!((mult - 0.5).abs() < 0.001, "Lateral multiplier should be 0.5, got {}", mult);
+
+        // 3. Moving laterally left (perpendicular West) -> 50% normal speed
+        let left = Vec2::new(-1.0, 0.0);
+        let mult = directional_speed_multiplier(facing, left);
+        assert!((mult - 0.5).abs() < 0.001, "Lateral multiplier should be 0.5, got {}", mult);
+
+        // 4. Moving backwards (opposite direction South) -> 50% normal speed
+        let backwards = Vec2::new(0.0, 1.0);
+        let mult = directional_speed_multiplier(facing, backwards);
+        assert!((mult - 0.5).abs() < 0.001, "Backwards multiplier should be 0.5, got {}", mult);
+
+        // 5. Moving diagonal backwards-left (South-West) -> 50% normal speed
+        let back_diag = Vec2::new(-1.0, 1.0);
+        let mult = directional_speed_multiplier(facing, back_diag);
+        assert!((mult - 0.5).abs() < 0.001, "Backwards-diagonal multiplier should be 0.5, got {}", mult);
+
+        // 6. Moving diagonal forward-right (North-East, 45 deg) -> smooth transition (~0.854)
+        let fwd_diag = Vec2::new(1.0, -1.0);
+        let mult = directional_speed_multiplier(facing, fwd_diag);
+        let expected = 0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((mult - expected).abs() < 0.01, "Diagonal forward multiplier should be ~{:.3}, got {}", expected, mult);
     }
 }
 

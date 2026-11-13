@@ -1,6 +1,7 @@
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
-    can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision,
+    can_see_target, directional_speed_multiplier, find_avoidance_direction,
+    resolve_circle_obstacle_collision,
 };
 use crate::common::types::{
     CurrentLevel, GunshotEvent, LevelEntity, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance,
@@ -357,7 +358,11 @@ pub fn setup_zombies(
                     vision_range: 24.0,
                     vision_half_angle: 45.0_f32.to_radians(),
                     inner_radius: 2.5,
-                    attack_cooldown: Timer::from_seconds(0.8, TimerMode::Once),
+                    attack_cooldown: {
+                        let mut t = Timer::from_seconds(0.8, TimerMode::Once);
+                        t.set_elapsed(std::time::Duration::from_secs(1));
+                        t
+                    },
                 },
                 Enemy {
                     state: EnemyAiState::Search,
@@ -616,7 +621,8 @@ pub fn update_enemy(
                         &low_walls,
                         soldier_radius,
                     );
-                    let crawl_speed = enemy.speed * 0.32;
+                    let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                    let crawl_speed = enemy.speed * 0.32 * dir_mult;
                     let next_pos = enemy_pos + move_dir * crawl_speed * dt;
                     let resolved = resolve_circle_obstacle_collision(
                         next_pos,
@@ -637,7 +643,8 @@ pub fn update_enemy(
                         &low_walls,
                         soldier_radius,
                     );
-                    let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75) * dt;
+                    let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                    let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75 * dir_mult) * dt;
                     let resolved = resolve_circle_obstacle_collision(
                         next_pos,
                         soldier_radius,
@@ -717,12 +724,14 @@ pub fn update_enemy(
                             &low_walls,
                             soldier_radius,
                         );
+                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
                         soldier.facing_dir = move_dir;
-                        let speed = match soldier.stance {
+                        let base_speed = match soldier.stance {
                             Stance::Standing => enemy.speed,
                             Stance::Crouching => enemy.speed * 0.6,
                             Stance::Prone => enemy.speed * 0.3,
                         };
+                        let speed = base_speed * dir_mult;
                         let next_pos = enemy_pos + move_dir * speed * dt;
                         let resolved = resolve_circle_obstacle_collision(
                             next_pos,
@@ -779,8 +788,9 @@ pub fn update_enemy(
                         &low_walls,
                         soldier_radius,
                     );
+                    let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
                     soldier.facing_dir = move_dir;
-                    let next_pos = enemy_pos + move_dir * enemy.speed * dt;
+                    let next_pos = enemy_pos + move_dir * (enemy.speed * dir_mult) * dt;
                     let resolved = resolve_circle_obstacle_collision(
                         next_pos,
                         soldier_radius,
@@ -864,12 +874,20 @@ pub fn update_zombies(
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
 
     // Squad targets (Player + living Friendlies)
-    let mut squad_targets: Vec<(Entity, Vec2)> = Vec::new();
+    let mut squad_targets: Vec<(Entity, Vec2, Quat)> = Vec::new();
     for (p_ent, p_tf) in &player_q {
-        squad_targets.push((p_ent, Vec2::new(p_tf.translation.x, p_tf.translation.z)));
+        squad_targets.push((
+            p_ent,
+            Vec2::new(p_tf.translation.x, p_tf.translation.z),
+            p_tf.rotation,
+        ));
     }
     for (f_ent, f_tf) in &friendly_q {
-        squad_targets.push((f_ent, Vec2::new(f_tf.translation.x, f_tf.translation.z)));
+        squad_targets.push((
+            f_ent,
+            Vec2::new(f_tf.translation.x, f_tf.translation.z),
+            f_tf.rotation,
+        ));
     }
 
     let heard_gunshots: Vec<GunshotEvent> = gunshot_reader.read().copied().collect();
@@ -885,7 +903,7 @@ pub fn update_zombies(
 
         // 1. Vision: check if any squad member is inside zombie's vision cone and line-of-sight
         let mut visible_squad: Vec<(Vec2, f32)> = Vec::new();
-        for (_, s_pos) in &squad_targets {
+        for (_, s_pos, _) in &squad_targets {
             if can_see_target(
                 zombie_pos,
                 soldier.facing_dir,
@@ -931,8 +949,9 @@ pub fn update_zombies(
                     &low_walls,
                     soldier_radius,
                 );
+                let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
                 soldier.facing_dir = move_dir;
-                let next_pos = zombie_pos + move_dir * zombie.speed * dt;
+                let next_pos = zombie_pos + move_dir * (zombie.speed * dir_mult) * dt;
                 let resolved = resolve_circle_obstacle_collision(
                     next_pos,
                     soldier_radius,
@@ -966,8 +985,9 @@ pub fn update_zombies(
                 &low_walls,
                 soldier_radius,
             );
+            let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
             soldier.facing_dir = move_dir;
-            let wander_speed = zombie.speed * 0.65;
+            let wander_speed = zombie.speed * 0.65 * dir_mult;
             let next_pos = zombie_pos + move_dir * wander_speed * dt;
             let resolved =
                 resolve_circle_obstacle_collision(next_pos, soldier_radius, &buildings, &low_walls);
@@ -976,10 +996,15 @@ pub fn update_zombies(
         }
 
         // 4. Melee contact attack on player squad
+        let melee_reach = soldier_radius * 2.0 + 0.35; // 1.55m (pairwise collision pushes to ~1.20m)
+        let melee_reach_sq = melee_reach * melee_reach;
+
         if zombie.attack_cooldown.is_finished() {
-            for &(s_ent, s_pos) in &squad_targets {
-                if (s_pos - zombie_pos).length() < 1.05 {
+            let mut victim_idx = None;
+            for (idx, &(s_ent, s_pos, s_rot)) in squad_targets.iter().enumerate() {
+                if (s_pos - zombie_pos).length_squared() <= melee_reach_sq {
                     zombie.attack_cooldown.reset();
+                    zombie.target_pos = None;
 
                     // Lethal melee strike: convert victim soldier to corpse with blood pool
                     let mut entity_cmds = commands.entity(s_ent);
@@ -993,11 +1018,12 @@ pub fn update_zombies(
                             crate::common::types::Corpse,
                             Visibility::Inherited,
                             Transform::from_xyz(s_pos.x, 0.03, s_pos.y)
+                                .with_rotation(s_rot)
                                 .with_scale(Vec3::new(0.65, 0.95, 0.65)),
                             MeshMaterial3d(corpse_assets.player_corpse_material.clone()),
                         ));
 
-                    // Blood pool
+                    // Primary blood pool
                     commands.spawn((
                         LevelEntity,
                         Mesh3d(corpse_assets.blood_pool_mesh.clone()),
@@ -1006,8 +1032,26 @@ pub fn update_zombies(
                             .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                         crate::common::types::BloodDecal,
                     ));
+
+                    // Small splatter droplets
+                    let splatters = [Vec2::new(0.50, 0.40), Vec2::new(-0.45, -0.35)];
+                    for offset in splatters {
+                        commands.spawn((
+                            LevelEntity,
+                            Mesh3d(corpse_assets.blood_splatter_mesh.clone()),
+                            MeshMaterial3d(corpse_assets.blood_material.clone()),
+                            Transform::from_xyz(s_pos.x + offset.x, 0.015, s_pos.y + offset.y)
+                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                            crate::common::types::BloodDecal,
+                        ));
+                    }
+
+                    victim_idx = Some(idx);
                     break;
                 }
+            }
+            if let Some(idx) = victim_idx {
+                squad_targets.swap_remove(idx);
             }
         }
 
@@ -1416,7 +1460,11 @@ mod tests {
                     vision_range: 24.0,
                     vision_half_angle: 45.0_f32.to_radians(),
                     inner_radius: 2.5,
-                    attack_cooldown: Timer::from_seconds(0.8, TimerMode::Once),
+                    attack_cooldown: {
+                        let mut t = Timer::from_seconds(0.8, TimerMode::Once);
+                        t.set_elapsed(std::time::Duration::from_secs(1));
+                        t
+                    },
                 },
                 Enemy {
                     state: EnemyAiState::Search,
@@ -1679,5 +1727,116 @@ mod tests {
         // Reloaded to 30 rounds, and immediately engaged target by firing 1 round
         assert_eq!(soldier.ammo.current_mag, 29);
         assert_eq!(soldier.ammo.reserve_mags, 5);
+    }
+
+    #[test]
+    fn test_zombie_melee_kills_player_at_collision_distance() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let blood_pool_mesh = meshes.add(Circle::new(0.85));
+        let blood_splatter_mesh = meshes.add(Circle::new(0.22));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let blood_mat = materials.add(Color::srgb(0.5, 0.0, 0.0));
+        let corpse_mat = materials.add(Color::srgb(0.3, 0.3, 0.3));
+        app.insert_resource(crate::combat::bullet::CorpseAssets {
+            blood_pool_mesh,
+            blood_splatter_mesh,
+            blood_material: blood_mat,
+            player_corpse_material: corpse_mat.clone(),
+            enemy_corpse_material: corpse_mat,
+        });
+
+        // Player at origin
+        let player_entity = app
+            .world_mut()
+            .spawn((
+                Player,
+                Team::Player,
+                Transform::from_xyz(0.0, 0.05, 0.0)
+                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
+                },
+            ))
+            .id();
+
+        // Zombie at (0.0, 1.25) - within the melee reach (1.55m) and at typical collision contact distance (1.20m)
+        let _zombie_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 1.25),
+                Zombie {
+                    wander_dir: Vec2::new(0.0, -1.0),
+                    wander_timer: Timer::from_seconds(3.0, TimerMode::Repeating),
+                    target_pos: Some(Vec2::new(0.0, 0.0)),
+                    speed: 2.4,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    attack_cooldown: {
+                        let mut t = Timer::from_seconds(0.8, TimerMode::Once);
+                        t.set_elapsed(std::time::Duration::from_secs(1));
+                        t
+                    },
+                },
+                Enemy {
+                    state: EnemyAiState::Engage,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(999.0, TimerMode::Once),
+                    speed: 2.4,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
+                    stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_zombies);
+
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(50));
+
+        app.update();
+
+        // Player must have been killed and converted to Corpse
+        assert!(
+            app.world().get::<Player>(player_entity).is_none(),
+            "Player component should be removed on death"
+        );
+        assert!(
+            app.world().get::<Soldier>(player_entity).is_none(),
+            "Soldier component should be removed on death"
+        );
+        assert!(
+            app.world().get::<crate::common::types::Corpse>(player_entity).is_some(),
+            "Victim should gain Corpse component"
+        );
+
+        // Blood decal must be spawned
+        let blood_count = app
+            .world_mut()
+            .query::<&crate::common::types::BloodDecal>()
+            .iter(app.world())
+            .count();
+        assert!(blood_count >= 1, "At least 1 blood decal should be spawned");
     }
 }

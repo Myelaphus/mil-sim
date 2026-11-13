@@ -176,6 +176,10 @@ impl Soldier {
     pub fn is_standing(&self) -> bool {
         self.stance == Stance::Standing
     }
+
+    pub fn directional_speed_multiplier(&self, move_dir: Vec2) -> f32 {
+        crate::common::geometry::directional_speed_multiplier(self.facing_dir, move_dir)
+    }
 }
 
 #[cfg(test)]

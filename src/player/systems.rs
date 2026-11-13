@@ -2,7 +2,8 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
-    line_intersects_box, resolve_circle_circle_collision, resolve_circle_obstacle_collision,
+    directional_speed_multiplier, line_intersects_box, resolve_circle_circle_collision,
+    resolve_circle_obstacle_collision,
 };
 use crate::common::types::{GunshotEvent, LevelEntity, Soldier, Stance, Team, SOLDIER_RADIUS};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
@@ -93,7 +94,33 @@ pub fn update_player(
         Stance::Prone => Vec3::new(0.55, 1.15, 0.55), // Elongated narrow crawler profile
     };
 
-    // 2. WASD / Arrow keys movement with obstacle & soldier collision
+    // 2. Mouse aim direction for vision cone & soldier orientation
+    if let Ok(window) = windows.single() {
+        if let Ok((camera, camera_gt)) = camera_q.single() {
+            if let Some(cursor_pos) = window.cursor_position() {
+                if let Ok(ray) = camera.viewport_to_world(camera_gt, cursor_pos) {
+                    if let Some(dist) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) {
+                        let ground_pos = ray.get_point(dist);
+                        let diff_x = ground_pos.x - soldier_tf.translation.x;
+                        let diff_z = ground_pos.z - soldier_tf.translation.z;
+                        let aim_2d = Vec2::new(diff_x, diff_z);
+
+                        if aim_2d.length_squared() > 0.01 {
+                            let dir = aim_2d.normalize();
+                            soldier.facing_dir = dir;
+
+                            // Rotate soldier token to face mouse cursor
+                            let yaw = f32::atan2(-dir.x, -dir.y);
+                            soldier_tf.rotation =
+                                Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. WASD / Arrow keys movement with directional speed multiplier
     let mut move_delta = Vec3::ZERO;
     if keyboard_input.pressed(KeyCode::KeyW) || keyboard_input.pressed(KeyCode::ArrowUp) {
         move_delta.z -= 1.0;
@@ -110,11 +137,15 @@ pub fn update_player(
 
     if move_delta.length_squared() > 0.0 {
         let base_speed = 12.0;
-        let speed = match soldier.stance {
+        let stance_speed = match soldier.stance {
             Stance::Standing => base_speed,
             Stance::Crouching => base_speed * 0.55, // Slower tactical crouch-walking
             Stance::Prone => base_speed * 0.23,     // Very slow crawling speed
         };
+        let move_dir = Vec2::new(move_delta.x, move_delta.z).normalize();
+        // Moving forward (facing direction) is 100% normal speed; lateral or backwards is 50% normal speed
+        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+        let speed = stance_speed * dir_mult;
         let delta = move_delta.normalize() * speed * time.delta_secs();
         let soldier_radius = SOLDIER_RADIUS;
 
@@ -135,35 +166,6 @@ pub fn update_player(
             resolve_circle_obstacle_collision(new_pos, soldier_radius, &buildings, &low_walls);
         soldier_tf.translation.x = resolved.x;
         soldier_tf.translation.z = resolved.y;
-    }
-
-    // 3. Mouse aim direction for vision cone & soldier orientation
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Ok((camera, camera_gt)) = camera_q.single() else {
-        return;
-    };
-
-    if let Some(cursor_pos) = window.cursor_position() {
-        if let Ok(ray) = camera.viewport_to_world(camera_gt, cursor_pos) {
-            if let Some(dist) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) {
-                let ground_pos = ray.get_point(dist);
-                let diff_x = ground_pos.x - soldier_tf.translation.x;
-                let diff_z = ground_pos.z - soldier_tf.translation.z;
-                let aim_2d = Vec2::new(diff_x, diff_z);
-
-                if aim_2d.length_squared() > 0.01 {
-                    let dir = aim_2d.normalize();
-                    soldier.facing_dir = dir;
-
-                    // Rotate soldier token to face mouse cursor
-                    let yaw = f32::atan2(-dir.x, -dir.y);
-                    soldier_tf.rotation =
-                        Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
-                }
-            }
-        }
     }
 
     // 4. Weapon reloading & shooting (Player team)
@@ -228,6 +230,146 @@ pub fn update_player(
                     shooter_team: Team::Player,
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_player_test_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<Time>();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let dummy_mesh = meshes.add(Circle::new(0.1));
+        let mut mats = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = mats.add(Color::WHITE);
+
+        app.insert_resource(BulletAssets {
+            mesh: dummy_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        app.add_systems(Update, update_player);
+        app
+    }
+
+    #[test]
+    fn test_player_forward_movement_is_full_speed() {
+        let mut app = create_player_test_app();
+
+        // Player facing North (0.0, -1.0) at (0, 0, 0)
+        let player_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Player,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    ammo: crate::common::types::WeaponAmmo::default(),
+                },
+            ))
+            .id();
+
+        // Press 'W' to move North (forward, matching facing_dir)
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(KeyCode::KeyW);
+
+        // Advance 0.5s: base standing speed = 12.0 m/s * 1.0 (forward) = 12.0 m/s
+        // Distance traveled should be 6.0m North (Z = -6.0)
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(500));
+
+        app.update();
+
+        let tf = app.world().get::<Transform>(player_entity).unwrap();
+        assert!(
+            (tf.translation.z - (-6.0)).abs() < 0.01,
+            "Player moving forward should move at 100% normal speed (-6.0m), got Z = {}",
+            tf.translation.z
+        );
+        assert_eq!(tf.translation.x, 0.0);
+    }
+
+    #[test]
+    fn test_player_lateral_and_backwards_movement_is_half_speed() {
+        // 1. Backwards test (moving South while facing North)
+        {
+            let mut app = create_player_test_app();
+            let player_entity = app
+                .world_mut()
+                .spawn((
+                    Transform::from_xyz(0.0, 0.05, 0.0),
+                    Player,
+                    Soldier {
+                        facing_dir: Vec2::new(0.0, -1.0), // Facing North
+                        shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                        stance: Stance::Standing,
+                        ammo: crate::common::types::WeaponAmmo::default(),
+                    },
+                ))
+                .id();
+
+            // Press 'S' to backpedal South (opposite to facing_dir)
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::KeyS);
+
+            // Advance 0.5s: 12.0 m/s * 0.5 (backwards) * 0.5s = 3.0m South (Z = 3.0)
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(500));
+
+            app.update();
+
+            let tf = app.world().get::<Transform>(player_entity).unwrap();
+            assert!(
+                (tf.translation.z - 3.0).abs() < 0.01,
+                "Player moving backwards should move at 50% normal speed (3.0m), got Z = {}",
+                tf.translation.z
+            );
+        }
+
+        // 2. Lateral strafe test (moving East while facing North)
+        {
+            let mut app = create_player_test_app();
+            let player_entity = app
+                .world_mut()
+                .spawn((
+                    Transform::from_xyz(0.0, 0.05, 0.0),
+                    Player,
+                    Soldier {
+                        facing_dir: Vec2::new(0.0, -1.0), // Facing North
+                        shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                        stance: Stance::Standing,
+                        ammo: crate::common::types::WeaponAmmo::default(),
+                    },
+                ))
+                .id();
+
+            // Press 'D' to strafe East (perpendicular to facing_dir)
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::KeyD);
+
+            // Advance 0.5s: 12.0 m/s * 0.5 (lateral) * 0.5s = 3.0m East (X = 3.0)
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(500));
+
+            app.update();
+
+            let tf = app.world().get::<Transform>(player_entity).unwrap();
+            assert!(
+                (tf.translation.x - 3.0).abs() < 0.01,
+                "Player moving laterally should move at 50% normal speed (3.0m), got X = {}",
+                tf.translation.x
+            );
         }
     }
 }

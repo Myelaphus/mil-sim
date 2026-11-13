@@ -1,6 +1,7 @@
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
-    can_see_target, find_avoidance_direction, resolve_circle_obstacle_collision,
+    can_see_target, directional_speed_multiplier, find_avoidance_direction,
+    resolve_circle_obstacle_collision,
 };
 use crate::common::types::{GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Team};
 use crate::enemy::ai::Enemy;
@@ -330,7 +331,9 @@ pub fn update_friendly(
 
                         // Catch-up acceleration if fallen behind
                         let catch_up = if dist_to_spot > 3.5 { 1.25 } else { 1.0 };
-                        let speed = friendly.speed * speed_multiplier * catch_up;
+                        // Moving forward is normal speed; lateral or backwards is 50% normal speed
+                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                        let speed = friendly.speed * speed_multiplier * catch_up * dir_mult;
 
                         let next_pos = friendly_pos + move_dir * speed * dt;
                         let resolved = resolve_circle_obstacle_collision(
