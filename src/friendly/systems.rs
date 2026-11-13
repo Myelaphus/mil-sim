@@ -269,6 +269,7 @@ pub fn update_friendly(
     >,
     bullet_assets: Res<BulletAssets>,
     mut gunshot_mutator: MessageMutator<GunshotEvent>,
+    mut formation_state: Local<Option<(Vec2, Vec2)>>,
 ) {
     let dt = time.delta_secs();
     let soldier_radius = SOLDIER_RADIUS;
@@ -283,26 +284,38 @@ pub fn update_friendly(
         )
     });
 
+    // Only update formation heading when the player actually moves, so looking around while
+    // standing still does not cause the squad to constantly reposition around the player.
+    let formation_heading = if let Some((p_pos, p_facing, _)) = player_info {
+        let state = formation_state.get_or_insert((p_pos, p_facing));
+        if (p_pos - state.0).length_squared() > 0.0001 {
+            state.0 = p_pos;
+            state.1 = p_facing;
+        }
+        state.1
+    } else {
+        Vec2::new(0.0, -1.0)
+    };
+
     // Capture snapshot of living friendlies to coordinate squad and fire team following
-    let friendly_snapshots: Vec<(usize, usize, Vec2, Vec2)> = friendly_q
+    let friendly_snapshots: Vec<(usize, usize, Vec2)> = friendly_q
         .iter()
-        .map(|(tf, f, s)| {
+        .map(|(tf, f, _)| {
             (
                 f.fireteam,
                 f.slot,
                 Vec2::new(tf.translation.x, tf.translation.z),
-                s.facing_dir,
             )
         })
         .collect();
     let ft1_lead_info = friendly_snapshots
         .iter()
-        .find(|(ft, slot, _, _)| *ft == 1 && *slot == 0)
-        .map(|(_, _, pos, facing)| (*pos, *facing));
+        .find(|(ft, slot, _)| *ft == 1 && *slot == 0)
+        .map(|(_, _, pos)| (*pos, formation_heading));
     let ft2_lead_info = friendly_snapshots
         .iter()
-        .find(|(ft, slot, _, _)| *ft == 2 && *slot == 0)
-        .map(|(_, _, pos, facing)| (*pos, *facing));
+        .find(|(ft, slot, _)| *ft == 2 && *slot == 0)
+        .map(|(_, _, pos)| (*pos, formation_heading));
 
     let heard_gunshots: Vec<GunshotEvent> = gunshot_mutator.read().map(|e| *e).collect();
 
@@ -372,12 +385,12 @@ pub fn update_friendly(
 
                     // Keep moving toward formation if far out of position while engaging
                     let mut is_moving = false;
-                    if let Some((p_pos, p_facing, _)) = player_info {
+                    if let Some((p_pos, _, _)) = player_info {
                         let (formation_spot, _, _) = compute_formation_target(
                             friendly.fireteam,
                             friendly.slot,
                             p_pos,
-                            p_facing,
+                            formation_heading,
                             ft1_lead_info,
                             ft2_lead_info,
                         );
@@ -500,12 +513,12 @@ pub fn update_friendly(
                 }
             }
             FriendlyAiState::Follow => {
-                if let Some((p_pos, p_facing, p_stance)) = player_info {
+                if let Some((p_pos, _, p_stance)) = player_info {
                     let (formation_spot, base_facing, flank_angle) = compute_formation_target(
                         friendly.fireteam,
                         friendly.slot,
                         p_pos,
-                        p_facing,
+                        formation_heading,
                         ft1_lead_info,
                         ft2_lead_info,
                     );
@@ -1600,5 +1613,65 @@ mod tests {
             !bullets.is_empty(),
             "Friendly should fire at visible enemy while moving back into formation"
         );
+    }
+
+    #[test]
+    fn test_squad_does_not_reposition_when_player_stands_still_and_looks_around() {
+        let mut app = create_test_app();
+        app.add_systems(Startup, (crate::player::setup_player, setup_friendly));
+        app.add_systems(Update, update_friendly);
+        app.update();
+
+        // Let squad settle for a few frames
+        for _ in 0..10 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(16));
+            app.update();
+        }
+
+        let initial_positions: Vec<(usize, usize, Vec2)> = app
+            .world_mut()
+            .query::<(&Friendly, &Transform)>()
+            .iter(app.world())
+            .map(|(f, tf)| (f.fireteam, f.slot, Vec2::new(tf.translation.x, tf.translation.z)))
+            .collect();
+        assert_eq!(initial_positions.len(), 8);
+
+        // Rotate player facing direction 90 deg East, then 180 deg South, while standing still
+        for look_dir in [Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0), Vec2::new(-1.0, 0.0)] {
+            {
+                let mut player_q = app.world_mut().query_filtered::<&mut Soldier, With<Player>>();
+                let mut player_soldier = player_q.single_mut(app.world_mut()).unwrap();
+                player_soldier.facing_dir = look_dir;
+            }
+            for _ in 0..20 {
+                let mut time = app.world_mut().resource_mut::<Time>();
+                time.advance_by(std::time::Duration::from_millis(16));
+                app.update();
+            }
+        }
+
+        let final_positions: Vec<(usize, usize, Vec2)> = app
+            .world_mut()
+            .query::<(&Friendly, &Transform)>()
+            .iter(app.world())
+            .map(|(f, tf)| (f.fireteam, f.slot, Vec2::new(tf.translation.x, tf.translation.z)))
+            .collect();
+
+        for (ft, slot, init_pos) in &initial_positions {
+            let final_pos = final_positions
+                .iter()
+                .find(|(f, s, _)| f == ft && s == slot)
+                .map(|(_, _, p)| *p)
+                .unwrap();
+            let moved = (*init_pos - final_pos).length();
+            assert!(
+                moved < 0.05,
+                "FT{} slot {} repositioned by {}m while player stood still and looked around!",
+                ft,
+                slot,
+                moved
+            );
+        }
     }
 }
