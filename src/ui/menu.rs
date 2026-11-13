@@ -67,7 +67,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                         TextColor(Color::srgb(0.92, 0.96, 1.0)),
                     ));
                     header.spawn((
-                        Text::new("TACTICAL FIRE TEAM ENGAGEMENT SIMULATOR"),
+                        Text::new("TACTICAL SQUAD ENGAGEMENT SIMULATOR"),
                         TextFont {
                             font_size: FontSize::Px(15.0),
                             ..default()
@@ -129,7 +129,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                         });
 
                     section.spawn((
-                        Text::new("Compound Infiltration • 4-Man Fire Team vs 5 Armed Guards"),
+                        Text::new("Compound Infiltration • 9-Man Rifle Squad (2 Fire Teams) vs 5 Armed Guards"),
                         TextFont {
                             font_size: FontSize::Px(12.0),
                             ..default()
@@ -167,7 +167,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                         });
 
                     section.spawn((
-                        Text::new("Zombie Infestation • 4-Man Fire Team vs Zombies"),
+                        Text::new("Zombie Infestation • 9-Man Rifle Squad (2 Fire Teams) vs Zombies"),
                         TextFont {
                             font_size: FontSize::Px(12.0),
                             ..default()
@@ -199,7 +199,7 @@ pub fn setup_main_menu(mut commands: Commands) {
                         TextColor(Color::srgb(0.25, 0.72, 0.92)),
                     ));
                     controls.spawn((
-                        Text::new("• WASD: Fire Team Movement  |  Mouse: Aim & Vision Orientation"),
+                        Text::new("• Player: Squad Leader (in formation gap)  |  WASD: Squad Movement  |  Mouse: Aim & Vision Orientation"),
                         TextFont {
                             font_size: FontSize::Px(12.0),
                             ..default()

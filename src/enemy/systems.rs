@@ -243,13 +243,13 @@ pub fn generate_dynamic_zombie_spawns(count: usize, seed: u64) -> Vec<Vec2> {
 
     let soldier_radius = SOLDIER_RADIUS;
     let player_safe_pos = Vec2::new(0.0, 48.0);
-    let player_safe_radius = 18.0;
+    let player_safe_radius = 28.0;
 
     let mut current_min_separation = 4.5_f32;
     let absolute_min_separation = soldier_radius * 2.4; // 1.44m (strictly > 2 * SOLDIER_RADIUS)
 
     let spawn_bounds_x = (-48.0_f32, 48.0_f32);
-    let spawn_bounds_y = (-48.0_f32, 34.0_f32);
+    let spawn_bounds_y = (-48.0_f32, 20.0_f32);
 
     for _ in 0..count {
         let mut placed = false;
@@ -1569,11 +1569,11 @@ mod tests {
                 pos
             );
 
-            // Safe from player spawn at (0, 48)
+            // Safe from player & squad spawn at (0, 48) and outside 24m vision range
             let to_player = pos - Vec2::new(0.0, 48.0);
             assert!(
-                to_player.length() >= 18.0,
-                "Spawn {} ({:?}) too close to player spawn",
+                to_player.length() >= 28.0,
+                "Spawn {} ({:?}) too close to player/squad spawn",
                 i,
                 pos
             );

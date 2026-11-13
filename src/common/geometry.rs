@@ -426,6 +426,28 @@ pub fn find_avoidance_direction(
     desired_norm
 }
 
+/// Maximum angular spread (in radians, +/- ~8 degrees) applied to shots fired while moving.
+pub const MOVING_SHOOT_MAX_SPREAD_RAD: f32 = 0.14;
+
+/// Apply an accuracy penalty (angular spread) when firing while moving.
+/// Stationary shots return `dir` unchanged.
+pub fn apply_shoot_spread(dir: Vec2, is_moving: bool, seed: u64) -> Vec2 {
+    if !is_moving {
+        return dir;
+    }
+    // SplitMix64 mixing for deterministic, well-distributed pseudo-random angle
+    let mut z = seed.wrapping_add(0x9e3779b97f4a7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z = z ^ (z >> 31);
+    // Map to [-1.0, 1.0]
+    let unit = ((z >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0;
+    let angle = (unit as f32) * MOVING_SHOOT_MAX_SPREAD_RAD;
+    let (s, c) = angle.sin_cos();
+    let norm = dir.normalize_or_zero();
+    Vec2::new(norm.x * c - norm.y * s, norm.x * s + norm.y * c).normalize_or_zero()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +645,34 @@ mod tests {
         let mult = directional_speed_multiplier(facing, fwd_diag);
         let expected = 0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2;
         assert!((mult - expected).abs() < 0.01, "Diagonal forward multiplier should be ~{:.3}, got {}", expected, mult);
+    }
+
+    #[test]
+    fn test_apply_shoot_spread_stationary_vs_moving() {
+        let dir = Vec2::new(0.0, -1.0);
+
+        // Stationary shots have zero spread penalty
+        for seed in 0..10u64 {
+            let out = apply_shoot_spread(dir, false, seed);
+            assert!((out - dir).length() < 1e-6, "Stationary shot should have zero spread");
+        }
+
+        // Moving shots apply bounded angular spread within MOVING_SHOOT_MAX_SPREAD_RAD
+        let mut any_deviated = false;
+        for seed in 0..20u64 {
+            let out = apply_shoot_spread(dir, true, seed);
+            let angle = dir.angle_to(out).abs();
+            assert!(
+                angle <= MOVING_SHOOT_MAX_SPREAD_RAD + 1e-4,
+                "Moving spread angle {} exceeded max {}",
+                angle,
+                MOVING_SHOOT_MAX_SPREAD_RAD
+            );
+            if angle > 1e-3 {
+                any_deviated = true;
+            }
+        }
+        assert!(any_deviated, "At least some moving shots should deviate from exact aim");
     }
 }
 

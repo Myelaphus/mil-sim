@@ -7,9 +7,10 @@ pub enum FriendlyAiState {
     Engage,
 }
 
-#[derive(Component)]
+#[derive(Component, Debug, Clone)]
 pub struct Friendly {
-    pub slot: usize, // 0 = Left flank, 1 = Right flank
+    pub fireteam: usize, // 1 = First Fire Team (Alpha), 2 = Second Fire Team (Bravo)
+    pub slot: usize,     // Slot within the fire team
     pub state: FriendlyAiState,
     pub shoot_timer: Timer,
     pub speed: f32,

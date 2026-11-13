@@ -1,12 +1,12 @@
-use std::f32::consts::FRAC_PI_2;
-use bevy::prelude::*;
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
-    directional_speed_multiplier, line_intersects_box, resolve_circle_circle_collision,
-    resolve_circle_obstacle_collision,
+    apply_shoot_spread, directional_speed_multiplier, line_intersects_box,
+    resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{GunshotEvent, LevelEntity, Soldier, Stance, Team, SOLDIER_RADIUS};
+use crate::common::types::{GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Team};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
+use bevy::prelude::*;
+use std::f32::consts::FRAC_PI_2;
 
 #[derive(Component)]
 pub struct Player;
@@ -34,8 +34,7 @@ pub fn setup_player(
             LevelEntity,
             Mesh3d(player_soldier_mesh),
             MeshMaterial3d(player_soldier_material),
-            Transform::from_xyz(0.0, 0.05, 48.0)
-                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+            Transform::from_xyz(0.0, 0.05, 48.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
             Player,
             Team::Player,
             Soldier {
@@ -99,7 +98,9 @@ pub fn update_player(
         if let Ok((camera, camera_gt)) = camera_q.single() {
             if let Some(cursor_pos) = window.cursor_position() {
                 if let Ok(ray) = camera.viewport_to_world(camera_gt, cursor_pos) {
-                    if let Some(dist) = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y)) {
+                    if let Some(dist) =
+                        ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+                    {
                         let ground_pos = ray.get_point(dist);
                         let diff_x = ground_pos.x - soldier_tf.translation.x;
                         let diff_z = ground_pos.z - soldier_tf.translation.z;
@@ -157,7 +158,8 @@ pub fn update_player(
         // Resolve collision against other soldiers (cannot occupy same space)
         for other_tf in &other_soldiers_q {
             let other_pos = Vec2::new(other_tf.translation.x, other_tf.translation.z);
-            new_pos = resolve_circle_circle_collision(new_pos, soldier_radius, other_pos, soldier_radius);
+            new_pos =
+                resolve_circle_circle_collision(new_pos, soldier_radius, other_pos, soldier_radius);
         }
 
         let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
@@ -218,7 +220,10 @@ pub fn update_player(
 
                     let aim_probe = spawn_pos + soldier.facing_dir * 0.5;
                     if line_intersects_box(soldier_pos, aim_probe, w_min, w_max)
-                        || (spawn_pos.x >= w_min.x && spawn_pos.x <= w_max.x && spawn_pos.y >= w_min.y && spawn_pos.y <= w_max.y)
+                        || (spawn_pos.x >= w_min.x
+                            && spawn_pos.x <= w_max.x
+                            && spawn_pos.y >= w_min.y
+                            && spawn_pos.y <= w_max.y)
                     {
                         muzzle_blocked = true;
                         break;
@@ -227,6 +232,11 @@ pub fn update_player(
             }
 
             if !muzzle_blocked {
+                let is_moving = move_delta.length_squared() > 0.0;
+                let spread_seed = time.elapsed_secs().to_bits() as u64
+                    ^ (soldier_pos.x.to_bits() as u64)
+                    ^ ((soldier_pos.y.to_bits() as u64) << 16);
+                let shot_dir = apply_shoot_spread(soldier.facing_dir, is_moving, spread_seed);
                 commands.spawn((
                     LevelEntity,
                     Mesh3d(bullet_assets.mesh.clone()),
@@ -235,7 +245,7 @@ pub fn update_player(
                         .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                     Bullet {
                         origin: soldier_pos,
-                        direction: soldier.facing_dir,
+                        direction: shot_dir,
                         speed: bullet_speed,
                         lifetime: bullet_lifetime,
                         team: Team::Player,
@@ -450,5 +460,69 @@ mod tests {
         assert_eq!(active.ammo.reserve_mags, 0);
         assert!(active.bullet_speed() * active.bullet_lifetime() < 30.0);
     }
-}
 
+    #[test]
+    fn test_player_moving_shoot_has_spread_stationary_does_not() {
+        let mut app = create_player_test_app();
+
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 0.0),
+            Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.01, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::player_default(),
+            },
+        ));
+
+        // 1. Fire while stationary
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
+        {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(20));
+        }
+        app.update();
+
+        let stationary_bullets: Vec<Vec2> = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .map(|b| b.direction)
+            .collect();
+        assert_eq!(stationary_bullets.len(), 1);
+        assert!(
+            (stationary_bullets[0] - Vec2::new(0.0, -1.0)).length() < 1e-5,
+            "Stationary shot must have zero spread, got {:?}",
+            stationary_bullets[0]
+        );
+
+        // 2. Fire multiple shots while moving laterally (KeyD)
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyD);
+        for _ in 0..8 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let all_bullets: Vec<Vec2> = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .map(|b| b.direction)
+            .collect();
+        assert!(all_bullets.len() > 2);
+        let any_spread = all_bullets.iter().skip(1).any(|&dir| {
+            let angle = Vec2::new(0.0, -1.0).angle_to(dir).abs();
+            angle > 1e-3 && angle <= crate::common::geometry::MOVING_SHOOT_MAX_SPREAD_RAD + 1e-4
+        });
+        assert!(
+            any_spread,
+            "Moving shots should apply angular spread penalty"
+        );
+    }
+}
