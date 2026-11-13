@@ -121,7 +121,7 @@ pub fn setup_guards(
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -382,7 +382,7 @@ pub fn setup_zombies(
                     facing_dir: facing,
                     shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -471,7 +471,7 @@ pub fn update_enemy(
     let heard_gunshots: Vec<GunshotEvent> = gunshot_reader.read().copied().collect();
 
     for (mut tf, mut enemy, mut soldier) in &mut enemy_q {
-        soldier.ammo.tick_reload(time.delta());
+        soldier.inventory.tick(time.delta());
         let enemy_pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         // 0. React to nearby gunfire or active near-miss bullets if not already engaged in combat
@@ -660,14 +660,33 @@ pub fn update_enemy(
                     soldier.stance = Stance::Standing;
                 }
 
-                // Fire at player
+                // If active weapon is completely out of ammunition and soldier has a sidearm, switch to sidearm
+                if let Some(active) = soldier.inventory.active_weapon() {
+                    if active.ammo.is_completely_empty() && soldier.inventory.has_sidearm() && !soldier.inventory.is_swapping() {
+                        soldier.inventory.start_swap();
+                    }
+                }
+
+                // Fire at player if not swapping
                 enemy.shoot_timer.tick(time.delta());
-                if enemy.shoot_timer.is_finished() {
-                    if soldier.ammo.current_mag == 0 {
-                        soldier.ammo.start_reload();
-                    } else if soldier.ammo.can_fire() {
+                if enemy.shoot_timer.is_finished() && !soldier.inventory.is_swapping() {
+                    let mut should_fire = false;
+                    let mut bullet_speed = 38.0;
+                    let mut bullet_lifetime = 1.6;
+
+                    if let Some(weapon) = soldier.inventory.active_weapon_mut() {
+                        if weapon.ammo.current_mag == 0 {
+                            weapon.ammo.start_reload();
+                        } else if weapon.ammo.can_fire() {
+                            weapon.ammo.current_mag -= 1;
+                            bullet_speed = weapon.bullet_speed();
+                            bullet_lifetime = weapon.bullet_lifetime();
+                            should_fire = true;
+                        }
+                    }
+
+                    if should_fire {
                         enemy.shoot_timer.reset();
-                        soldier.ammo.current_mag -= 1;
 
                         // If crouched behind a low wall, pop up to standing to shoot over the wall
                         if near_low_wall {
@@ -686,8 +705,8 @@ pub fn update_enemy(
                             Bullet {
                                 origin: spawn_pos,
                                 direction: soldier.facing_dir,
-                                speed: 38.0,
-                                lifetime: 1.6,
+                                speed: bullet_speed,
+                                lifetime: bullet_lifetime,
                                 team: Team::Enemy,
                                 shooter_stance: soldier.stance,
                                 missed_entities: Vec::new(),
@@ -1116,7 +1135,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0), // South
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -1194,7 +1213,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -1277,7 +1296,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0), // Facing South, cannot see North
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -1291,7 +1310,7 @@ mod tests {
                 facing_dir: Vec2::new(0.0, 1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
-                ammo: crate::common::types::WeaponAmmo::default(),
+                inventory: crate::common::types::Inventory::default(),
             },
         ));
 
@@ -1364,7 +1383,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, 1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -1484,7 +1503,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -1665,13 +1684,13 @@ mod tests {
                 facing_dir: Vec2::new(0.0, 1.0),
                 shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                 stance: Stance::Standing,
-                ammo: crate::common::types::WeaponAmmo::default(),
+                inventory: crate::common::types::Inventory::default(),
             },
         ));
 
         // Spawn enemy at (0, 0) facing North (0, -1) with 0 ammo in mag
-        let mut empty_ammo = crate::common::types::WeaponAmmo::default();
-        empty_ammo.current_mag = 0;
+        let mut empty_inv = crate::common::types::Inventory::default();
+        empty_inv.active_weapon_mut().unwrap().ammo.current_mag = 0;
 
         let enemy_entity = app
             .world_mut()
@@ -1695,7 +1714,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: empty_ammo,
+                    inventory: empty_inv,
                 },
             ))
             .id();
@@ -1708,11 +1727,12 @@ mod tests {
         app.update();
 
         let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        let weapon = soldier.inventory.active_weapon().unwrap();
         assert!(
-            soldier.ammo.is_reloading(),
+            weapon.ammo.is_reloading(),
             "Enemy should start reload when empty"
         );
-        assert_eq!(soldier.ammo.current_mag, 0);
+        assert_eq!(weapon.ammo.current_mag, 0);
 
         // Advance 2.1 seconds to finish reload
         let mut time = app.world_mut().resource_mut::<Time>();
@@ -1720,13 +1740,105 @@ mod tests {
         app.update();
 
         let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        let weapon = soldier.inventory.active_weapon().unwrap();
         assert!(
-            !soldier.ammo.is_reloading(),
+            !weapon.ammo.is_reloading(),
             "Reload should finish after 2.0 seconds"
         );
         // Reloaded to 30 rounds, and immediately engaged target by firing 1 round
-        assert_eq!(soldier.ammo.current_mag, 29);
-        assert_eq!(soldier.ammo.reserve_mags, 5);
+        assert_eq!(weapon.ammo.current_mag, 29);
+        assert_eq!(weapon.ammo.reserve_mags, 5);
+    }
+
+    #[test]
+    fn test_enemy_switches_to_sidearm_when_main_weapon_runs_out_of_ammo() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // Spawn player at (0.0, -8.0)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, -8.0),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        // Enemy with Rifle (0 mag, 0 reserve) + Pistol (17 rounds)
+        let mut rifle = crate::common::types::Weapon::rifle();
+        rifle.ammo.current_mag = 0;
+        rifle.ammo.reserve_mags = 0;
+        let pistol = crate::common::types::Weapon::pistol();
+        let inv = crate::common::types::Inventory::new(vec![rifle, pistol]);
+
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Enemy {
+                    state: EnemyAiState::Engage,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: Some(Vec2::new(0.0, -8.0)),
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.05, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::ZERO,
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: inv,
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_enemy);
+
+        // Frame 1: Enemy engages, detects rifle is out of ammo, triggers swap to sidearm!
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(60));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        assert!(soldier.inventory.is_swapping());
+        assert_eq!(
+            soldier.inventory.pending_weapon().unwrap().weapon_type,
+            crate::common::types::WeaponType::Pistol
+        );
+
+        // Advance 2.1 seconds to finish swap
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(2100));
+        app.update();
+
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        assert!(!soldier.inventory.is_swapping());
+        let active = soldier.inventory.active_weapon().unwrap();
+        assert_eq!(active.weapon_type, crate::common::types::WeaponType::Pistol);
+        assert_eq!(active.ammo.current_mag, 16); // Fired 1 pistol round
     }
 
     #[test]
@@ -1763,7 +1875,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -1805,7 +1917,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(999.0, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();

@@ -42,7 +42,7 @@ pub fn setup_player(
                 facing_dir: Vec2::new(0.0, -1.0), // Facing North (-Z)
                 shoot_cooldown: Timer::from_seconds(0.12, TimerMode::Once),
                 stance: Stance::Standing,
-                ammo: crate::common::types::WeaponAmmo::default(),
+                inventory: crate::common::types::Inventory::player_default(),
             },
         ))
         .id();
@@ -168,25 +168,43 @@ pub fn update_player(
         soldier_tf.translation.z = resolved.y;
     }
 
-    // 4. Weapon reloading & shooting (Player team)
-    soldier.ammo.tick_reload(time.delta());
+    // 4. Weapon inventory, swapping, reloading & shooting (Player team)
+    soldier.inventory.tick(time.delta());
 
-    // 'R' key manual reload
-    if keyboard_input.just_pressed(KeyCode::KeyR) {
-        soldier.ammo.start_reload();
+    // 'F' key weapon swap (takes 2 seconds)
+    if keyboard_input.just_pressed(KeyCode::KeyF) {
+        soldier.inventory.start_swap();
+    }
+
+    // 'R' key manual reload (if not swapping)
+    if keyboard_input.just_pressed(KeyCode::KeyR) && !soldier.inventory.is_swapping() {
+        if let Some(weapon) = soldier.inventory.active_weapon_mut() {
+            weapon.ammo.start_reload();
+        }
     }
 
     soldier.shoot_cooldown.tick(time.delta());
     let wants_to_shoot = keyboard_input.just_pressed(KeyCode::Space)
         || (keyboard_input.pressed(KeyCode::Space) && soldier.shoot_cooldown.is_finished());
 
-    if wants_to_shoot {
-        if soldier.ammo.current_mag == 0 {
-            // Out of ammo in current magazine: automatically trigger reload if reserves available
-            soldier.ammo.start_reload();
-        } else if soldier.ammo.can_fire() {
+    if wants_to_shoot && !soldier.inventory.is_swapping() {
+        let mut should_fire = false;
+        let mut bullet_speed = 45.0;
+        let mut bullet_lifetime = 1.5;
+        if let Some(weapon) = soldier.inventory.active_weapon_mut() {
+            if weapon.ammo.current_mag == 0 {
+                // Out of ammo in current magazine: automatically trigger reload if reserves available
+                weapon.ammo.start_reload();
+            } else if weapon.ammo.can_fire() {
+                weapon.ammo.current_mag -= 1;
+                bullet_speed = weapon.bullet_speed();
+                bullet_lifetime = weapon.bullet_lifetime();
+                should_fire = true;
+            }
+        }
+
+        if should_fire {
             soldier.shoot_cooldown.reset();
-            soldier.ammo.current_mag -= 1;
             let soldier_pos = Vec2::new(soldier_tf.translation.x, soldier_tf.translation.z);
             let spawn_pos = soldier_pos + soldier.facing_dir * 0.85;
 
@@ -218,8 +236,8 @@ pub fn update_player(
                     Bullet {
                         origin: soldier_pos,
                         direction: soldier.facing_dir,
-                        speed: 45.0,
-                        lifetime: 1.5,
+                        speed: bullet_speed,
+                        lifetime: bullet_lifetime,
                         team: Team::Player,
                         shooter_stance: soldier.stance,
                         missed_entities: Vec::new(),
@@ -275,7 +293,7 @@ mod tests {
                     facing_dir: Vec2::new(0.0, -1.0),
                     shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                     stance: Stance::Standing,
-                    ammo: crate::common::types::WeaponAmmo::default(),
+                    inventory: crate::common::types::Inventory::default(),
                 },
             ))
             .id();
@@ -314,7 +332,7 @@ mod tests {
                         facing_dir: Vec2::new(0.0, -1.0), // Facing North
                         shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                         stance: Stance::Standing,
-                        ammo: crate::common::types::WeaponAmmo::default(),
+                        inventory: crate::common::types::Inventory::default(),
                     },
                 ))
                 .id();
@@ -349,7 +367,7 @@ mod tests {
                         facing_dir: Vec2::new(0.0, -1.0), // Facing North
                         shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
                         stance: Stance::Standing,
-                        ammo: crate::common::types::WeaponAmmo::default(),
+                        inventory: crate::common::types::Inventory::default(),
                     },
                 ))
                 .id();
@@ -371,6 +389,66 @@ mod tests {
                 tf.translation.x
             );
         }
+    }
+
+    #[test]
+    fn test_player_weapon_swap_with_f_key() {
+        let mut app = create_player_test_app();
+
+        let player_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 0.0),
+                Player,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.12, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::player_default(),
+                },
+            ))
+            .id();
+
+        // Initially equipped with Rifle
+        let soldier = app.world().get::<Soldier>(player_entity).unwrap();
+        assert_eq!(
+            soldier.inventory.active_weapon().unwrap().weapon_type,
+            crate::common::types::WeaponType::Rifle
+        );
+
+        // Press 'F' to initiate swap
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(KeyCode::KeyF);
+
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(50));
+        app.update();
+
+        // Clear inputs so KeyF is no longer just_pressed
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.clear();
+
+        // Swapping is in progress (takes 2.0s)
+        let soldier = app.world().get::<Soldier>(player_entity).unwrap();
+        assert!(soldier.inventory.is_swapping());
+        assert_eq!(
+            soldier.inventory.pending_weapon().unwrap().weapon_type,
+            crate::common::types::WeaponType::Pistol
+        );
+
+        // Advance 2.1 seconds to finish swap
+        let mut time = app.world_mut().resource_mut::<Time>();
+        time.advance_by(std::time::Duration::from_millis(2100));
+        app.update();
+
+        // Now equipped with Pistol (17 rounds, reduced range)
+        let soldier = app.world().get::<Soldier>(player_entity).unwrap();
+        assert!(!soldier.inventory.is_swapping());
+        let active = soldier.inventory.active_weapon().unwrap();
+        assert_eq!(active.weapon_type, crate::common::types::WeaponType::Pistol);
+        assert_eq!(active.ammo.current_mag, 17);
+        assert_eq!(active.ammo.reserve_mags, 0);
+        assert!(active.bullet_speed() * active.bullet_lifetime() < 30.0);
     }
 }
 
