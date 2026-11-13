@@ -13,6 +13,9 @@ pub struct TestLevel1Button;
 pub struct TestLevel2Button;
 
 #[derive(Component)]
+pub struct TestLevel3Button;
+
+#[derive(Component)]
 pub struct LevelOutcomeBanner;
 
 #[derive(Resource, Default)]
@@ -174,6 +177,44 @@ pub fn setup_main_menu(mut commands: Commands) {
                         },
                         TextColor(Color::srgb(0.40, 0.65, 0.45)),
                     ));
+
+                    // Button: test_level_3 (Courtyard Skirmish)
+                    section
+                        .spawn((
+                            Button,
+                            TestLevel3Button,
+                            Node {
+                                width: Val::Px(360.0),
+                                height: Val::Px(56.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border: UiRect::all(Val::Px(1.5)),
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                margin: UiRect::top(Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(BUTTON_NORMAL),
+                            BorderColor::all(Color::srgb(0.55, 0.40, 0.20)),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("▶  test_level_3"),
+                                TextFont {
+                                    font_size: FontSize::Px(20.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.95, 0.72, 0.30)),
+                            ));
+                        });
+
+                    section.spawn((
+                        Text::new("Courtyard Skirmish • 9-Man Rifle Squad vs Enemy Fire Team"),
+                        TextFont {
+                            font_size: FontSize::Px(12.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.70, 0.56, 0.35)),
+                    ));
                 });
 
             // Tactical Briefing & Controls Card
@@ -240,7 +281,12 @@ pub fn update_main_menu_interactions(
     mut current_level: ResMut<CurrentLevel>,
     mut level1_q: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
-        (Changed<Interaction>, With<TestLevel1Button>),
+        (
+            Changed<Interaction>,
+            With<TestLevel1Button>,
+            Without<TestLevel2Button>,
+            Without<TestLevel3Button>,
+        ),
     >,
     mut level2_q: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
@@ -248,6 +294,16 @@ pub fn update_main_menu_interactions(
             Changed<Interaction>,
             With<TestLevel2Button>,
             Without<TestLevel1Button>,
+            Without<TestLevel3Button>,
+        ),
+    >,
+    mut level3_q: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (
+            Changed<Interaction>,
+            With<TestLevel3Button>,
+            Without<TestLevel1Button>,
+            Without<TestLevel2Button>,
         ),
     >,
 ) {
@@ -285,6 +341,25 @@ pub fn update_main_menu_interactions(
             Interaction::None => {
                 *bg_color = BUTTON_NORMAL.into();
                 *border_color = BorderColor::all(Color::srgb(0.25, 0.45, 0.30));
+            }
+        }
+    }
+
+    for (interaction, mut bg_color, mut border_color) in &mut level3_q {
+        match *interaction {
+            Interaction::Pressed => {
+                *bg_color = Color::srgb(0.55, 0.38, 0.14).into();
+                *border_color = BorderColor::all(Color::srgb(0.95, 0.72, 0.30));
+                *current_level = CurrentLevel::Level3;
+                next_state.set(AppState::InGame);
+            }
+            Interaction::Hovered => {
+                *bg_color = Color::srgb(0.32, 0.24, 0.14).into();
+                *border_color = BorderColor::all(Color::srgb(0.75, 0.55, 0.25));
+            }
+            Interaction::None => {
+                *bg_color = BUTTON_NORMAL.into();
+                *border_color = BorderColor::all(Color::srgb(0.55, 0.40, 0.20));
             }
         }
     }
@@ -480,6 +555,38 @@ mod tests {
 
         let bg_color = app.world().get::<BackgroundColor>(button_entity).unwrap();
         assert_eq!(bg_color.0, Color::srgb(0.18, 0.55, 0.28));
+    }
+
+    #[test]
+    fn test_menu_button_interaction_launches_level_3() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<CurrentLevel>();
+
+        let button_entity = app
+            .world_mut()
+            .spawn((
+                Button,
+                TestLevel3Button,
+                Interaction::Pressed,
+                BackgroundColor(BUTTON_NORMAL),
+                BorderColor::all(Color::srgb(0.2, 0.3, 0.4)),
+            ))
+            .id();
+
+        app.add_systems(Update, update_main_menu_interactions);
+        app.update(); // Processes interaction, sets next_state
+        app.update(); // Applies StateTransition schedule
+
+        let state = app.world().resource::<State<AppState>>();
+        assert_eq!(*state.get(), AppState::InGame);
+
+        let current_lvl = app.world().resource::<CurrentLevel>();
+        assert_eq!(*current_lvl, CurrentLevel::Level3);
+
+        let bg_color = app.world().get::<BackgroundColor>(button_entity).unwrap();
+        assert_eq!(bg_color.0, Color::srgb(0.55, 0.38, 0.14));
     }
 
     #[test]

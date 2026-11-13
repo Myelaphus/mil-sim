@@ -72,3 +72,16 @@ pub const COMPOUND_LOW_WALLS: [(Vec3, Vec3); 14] = [
     (Vec3::new(5.0, 0.75, 1.0), Vec3::new(9.0, 0.375, -27.0)),
 ];
 
+// 4 waist-high walls arranged in a 16m x 16m square forming the Courtyard for test_level_3.
+// Sized so soldiers can see (24m vision) and fire (67.5m rifle range) from one side to the other.
+pub const COURTYARD_LOW_WALLS: [(Vec3, Vec3); 4] = [
+    // North courtyard wall
+    (Vec3::new(16.0, 0.75, 1.0), Vec3::new(0.0, 0.375, -8.0)),
+    // South courtyard wall
+    (Vec3::new(16.0, 0.75, 1.0), Vec3::new(0.0, 0.375, 8.0)),
+    // West courtyard wall
+    (Vec3::new(1.0, 0.75, 15.0), Vec3::new(-8.0, 0.375, 0.0)),
+    // East courtyard wall
+    (Vec3::new(1.0, 0.75, 15.0), Vec3::new(8.0, 0.375, 0.0)),
+];
+

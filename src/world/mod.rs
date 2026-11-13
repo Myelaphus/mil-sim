@@ -2,7 +2,7 @@ pub mod buildings;
 
 use bevy::prelude::*;
 pub use buildings::*;
-use crate::common::types::{AppState, LevelEntity, WORLD_HALF_SIZE, WORLD_SIZE};
+use crate::common::types::{AppState, CurrentLevel, LevelEntity, WORLD_HALF_SIZE, WORLD_SIZE};
 
 // Camera framing constants derived mathematically from viewport aspect ratio and world dimensions
 pub const CAMERA_VIEWPORT_HEIGHT: f32 = 68.0;
@@ -71,7 +71,10 @@ pub fn setup_level_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    current_level: Option<Res<CurrentLevel>>,
 ) {
+    let level = current_level.as_deref().copied().unwrap_or_default();
+
     // Ground plane sized to unified WORLD_SIZE
     commands.spawn((
         LevelEntity,
@@ -86,18 +89,20 @@ pub fn setup_level_world(
         ..default()
     });
 
-    // Spawn buildings
-    for (size, position) in COMPOUND_BUILDINGS {
-        commands.spawn((
-            LevelEntity,
-            Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
-            MeshMaterial3d(building_material.clone()),
-            Transform::from_translation(position),
-            Building,
-            BuildingCollider {
-                half_size: Vec2::new(size.x * 0.5, size.z * 0.5),
-            },
-        ));
+    // Spawn buildings (Compound levels only)
+    if level != CurrentLevel::Level3 {
+        for (size, position) in COMPOUND_BUILDINGS {
+            commands.spawn((
+                LevelEntity,
+                Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
+                MeshMaterial3d(building_material.clone()),
+                Transform::from_translation(position),
+                Building,
+                BuildingCollider {
+                    half_size: Vec2::new(size.x * 0.5, size.z * 0.5),
+                },
+            ));
+        }
     }
 
     // Waist-high low wall material (sandbag / concrete barrier tan-grey)
@@ -108,7 +113,11 @@ pub fn setup_level_world(
     });
 
     // Spawn waist-height low walls
-    for (size, position) in COMPOUND_LOW_WALLS {
+    let low_walls: &[(Vec3, Vec3)] = match level {
+        CurrentLevel::Level3 => &COURTYARD_LOW_WALLS,
+        _ => &COMPOUND_LOW_WALLS,
+    };
+    for &(size, position) in low_walls {
         commands.spawn((
             LevelEntity,
             Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),

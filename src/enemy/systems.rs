@@ -48,6 +48,9 @@ pub fn setup_enemy(
                 .map_or(42, |t| (t.elapsed().as_nanos() as u64) ^ 0x517cc1b727220a95);
             setup_zombies(&mut commands, &mut meshes, &mut materials, count, seed);
         }
+        CurrentLevel::Level3 => {
+            setup_courtyard_fireteam(&mut commands, &mut meshes, &mut materials);
+        }
     }
 }
 
@@ -55,6 +58,44 @@ pub fn setup_guards(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    // Spawn 5 enemy soldiers with distributed compound patrol assignments
+    let enemy_configs = [
+        // 1. North Central Guard (on North Central Avenue)
+        (Vec2::new(0.0, -25.0), Vec2::new(0.0, 1.0), 1),
+        // 2. Northwest Road Guard (on Northwest Avenue west of HQ)
+        (Vec2::new(-35.0, -20.0), Vec2::new(0.0, -1.0), 0),
+        // 3. Northeast Radar Guard (on Northeast Avenue)
+        (Vec2::new(35.0, -20.0), Vec2::new(0.0, 1.0), 2),
+        // 4. Southeast Armory Guard (on Southeast Avenue)
+        (Vec2::new(35.0, 20.0), Vec2::new(0.0, 1.0), 4),
+        // 5. Southwest Motor Pool Guard (on Southwest Avenue)
+        (Vec2::new(-35.0, 20.0), Vec2::new(0.0, -1.0), 6),
+    ];
+    spawn_enemy_soldiers(commands, meshes, materials, &enemy_configs);
+}
+
+/// Spawn a 4-man enemy fire team on the north side of the courtyard for `test_level_3`.
+pub fn setup_courtyard_fireteam(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    let south = Vec2::new(0.0, 1.0);
+    let fireteam_configs = [
+        (Vec2::new(-3.0, -10.5), south, 0),
+        (Vec2::new(-1.0, -11.5), south, 0),
+        (Vec2::new(1.0, -11.5), south, 0),
+        (Vec2::new(3.0, -10.5), south, 0),
+    ];
+    spawn_enemy_soldiers(commands, meshes, materials, &fireteam_configs);
+}
+
+fn spawn_enemy_soldiers(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    enemy_configs: &[(Vec2, Vec2, usize)],
 ) {
     let pointer_mesh = meshes.add(Circle::new(0.15));
     let enemy_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
@@ -79,21 +120,7 @@ pub fn setup_guards(
         ..default()
     });
 
-    // Spawn 5 enemy soldiers with distributed compound patrol assignments
-    let enemy_configs = [
-        // 1. North Central Guard (on North Central Avenue)
-        (Vec2::new(0.0, -25.0), Vec2::new(0.0, 1.0), 1),
-        // 2. Northwest Road Guard (on Northwest Avenue west of HQ)
-        (Vec2::new(-35.0, -20.0), Vec2::new(0.0, -1.0), 0),
-        // 3. Northeast Radar Guard (on Northeast Avenue)
-        (Vec2::new(35.0, -20.0), Vec2::new(0.0, 1.0), 2),
-        // 4. Southeast Armory Guard (on Southeast Avenue)
-        (Vec2::new(35.0, 20.0), Vec2::new(0.0, 1.0), 4),
-        // 5. Southwest Motor Pool Guard (on Southwest Avenue)
-        (Vec2::new(-35.0, 20.0), Vec2::new(0.0, -1.0), 6),
-    ];
-
-    for (pos, facing, start_wp_idx) in enemy_configs {
+    for &(pos, facing, start_wp_idx) in enemy_configs {
         let yaw = f32::atan2(-facing.x, -facing.y);
         let enemy = commands
             .spawn((
@@ -457,7 +484,9 @@ pub fn update_enemy(
     >,
     bullet_assets: Res<BulletAssets>,
     mut gunshot_reader: MessageReader<GunshotEvent>,
+    current_level: Option<Res<CurrentLevel>>,
 ) {
+    let level = current_level.as_deref().copied().unwrap_or_default();
     let dt = time.delta_secs();
     let soldier_radius = SOLDIER_RADIUS;
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
@@ -779,6 +808,10 @@ pub fn update_enemy(
             EnemyAiState::Search => {
                 // Standing during routine perimeter patrol
                 soldier.stance = Stance::Standing;
+                if level == CurrentLevel::Level3 {
+                    // Hold north-side courtyard overwatch facing South
+                    soldier.facing_dir = Vec2::new(0.0, 1.0);
+                } else {
                 let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
                 let to_wp = target_wp - enemy_pos;
                 let dist = to_wp.length();
@@ -818,6 +851,7 @@ pub fn update_enemy(
                     );
                     tf.translation.x = resolved.x;
                     tf.translation.z = resolved.y;
+                }
                 }
             }
         }
@@ -1950,5 +1984,79 @@ mod tests {
             .iter(app.world())
             .count();
         assert!(blood_count >= 1, "At least 1 blood decal should be spawned");
+    }
+
+    #[test]
+    fn test_courtyard_level_3_layout_and_spawns() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.insert_resource(CurrentLevel::Level3);
+        app.add_systems(
+            Startup,
+            (
+                crate::world::setup_level_world,
+                crate::player::setup_player,
+                crate::friendly::setup_friendly,
+                setup_enemy,
+            ),
+        );
+        app.update();
+
+        // 1. Courtyard map has 0 buildings and 4 waist-high walls arranged in a square
+        let building_count = app.world_mut().query::<&Building>().iter(app.world()).count();
+        assert_eq!(building_count, 0, "Level 3 courtyard should have no buildings");
+
+        let wall_positions: Vec<Vec2> = app
+            .world_mut()
+            .query_filtered::<&Transform, With<LowWall>>()
+            .iter(app.world())
+            .map(|tf| Vec2::new(tf.translation.x, tf.translation.z))
+            .collect();
+        assert_eq!(wall_positions.len(), 4, "Level 3 courtyard should have 4 low walls");
+
+        let north_z = wall_positions.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let south_z = wall_positions.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        let courtyard_span = south_z - north_z;
+        let rifle_range = crate::common::types::Weapon::rifle().bullet_speed()
+            * crate::common::types::Weapon::rifle().bullet_lifetime();
+        assert!(
+            courtyard_span > 10.0 && courtyard_span + 6.0 <= 24.0 && courtyard_span < rifle_range,
+            "Courtyard span ({}) should allow firing and seeing across from one side to the other",
+            courtyard_span
+        );
+
+        // 2. Enemy fire team (4 soldiers) spawns on the north side facing South
+        let enemies: Vec<(Vec2, Vec2, f32)> = app
+            .world_mut()
+            .query::<(&Enemy, &Transform, &Soldier)>()
+            .iter(app.world())
+            .map(|(e, tf, s)| (Vec2::new(tf.translation.x, tf.translation.z), s.facing_dir, e.vision_range))
+            .collect();
+        assert_eq!(enemies.len(), 4, "Level 3 should spawn a 4-man enemy fire team");
+
+        let player_pos = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Player>>()
+            .single(app.world())
+            .map(|tf| Vec2::new(tf.translation.x, tf.translation.z))
+            .unwrap();
+
+        for &(e_pos, facing_dir, vision_range) in &enemies {
+            assert!(
+                e_pos.y < north_z,
+                "Enemy fire team member should start on north side of courtyard (z < {}), got {}",
+                north_z,
+                e_pos.y
+            );
+            assert!(facing_dir.y > 0.5, "Enemy fire team should face South");
+            let dist_to_player = (player_pos - e_pos).length();
+            assert!(
+                dist_to_player > vision_range + 10.0,
+                "Friendly squad should start far enough south to not be in immediate firing range (dist={}, vision={})",
+                dist_to_player,
+                vision_range
+            );
+        }
     }
 }
