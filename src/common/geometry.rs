@@ -448,6 +448,153 @@ pub fn apply_shoot_spread(dir: Vec2, is_moving: bool, seed: u64) -> Vec2 {
     Vec2::new(norm.x * c - norm.y * s, norm.x * s + norm.y * c).normalize_or_zero()
 }
 
+/// Shortest Euclidean distance from `pos` to an axis-aligned box `(center, half_size)`.
+pub fn distance_to_box(pos: Vec2, center: Vec2, half_size: Vec2) -> f32 {
+    let min = center - half_size;
+    let max = center + half_size;
+    let clamped = pos.clamp(min, max);
+    (pos - clamped).length()
+}
+
+/// Returns true if `pos` is within `max_dist` of any low wall collider box.
+pub fn is_near_low_wall(
+    pos: Vec2,
+    low_walls: &[(&Transform, &LowWallCollider)],
+    max_dist: f32,
+) -> bool {
+    low_walls.iter().any(|(w_tf, w_col)| {
+        let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+        distance_to_box(pos, center, w_col.half_size) <= max_dist
+    })
+}
+
+/// Returns true if the line of fire from `shooter_pos` to `target_pos` intersects any low wall.
+pub fn has_low_wall_in_line_of_fire(
+    shooter_pos: Vec2,
+    target_pos: Vec2,
+    low_walls: &[(&Transform, &LowWallCollider)],
+) -> bool {
+    low_walls.iter().any(|(w_tf, w_col)| {
+        let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+        let min = center - w_col.half_size;
+        let max = center + w_col.half_size;
+        line_intersects_box(shooter_pos, target_pos, min, max)
+    })
+}
+
+/// Finds the nearest valid cover position directly behind an obstruction (`LowWall` or `Building`)
+/// that places the obstruction between the cover spot and `threat_pos`.
+pub fn find_cover_position(
+    soldier_pos: Vec2,
+    threat_pos: Vec2,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+    soldier_radius: f32,
+    search_radius: f32,
+) -> Option<Vec2> {
+    find_cover_position_with_offset(
+        soldier_pos,
+        threat_pos,
+        buildings,
+        low_walls,
+        soldier_radius,
+        search_radius,
+        0.0,
+    )
+}
+
+/// Like `find_cover_position`, with an optional `lateral_offset` along wide cover walls so
+/// multiple squadmates can spread out side-by-side behind the same wall without stacking.
+pub fn find_cover_position_with_offset(
+    soldier_pos: Vec2,
+    threat_pos: Vec2,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+    soldier_radius: f32,
+    search_radius: f32,
+    lateral_offset: f32,
+) -> Option<Vec2> {
+    let stand_off = soldier_radius + 0.25;
+    let mut best_spot: Option<(Vec2, f32)> = None;
+
+    let mut evaluate_box = |center: Vec2, half_size: Vec2, is_low_wall: bool| {
+        let soldier_dist_to_box = distance_to_box(soldier_pos, center, half_size);
+        if soldier_dist_to_box > search_radius {
+            return;
+        }
+        // Only use obstructions that are on our side of the engagement (not closer to the threat)
+        let threat_dist_to_box = distance_to_box(threat_pos, center, half_size);
+        if threat_dist_to_box + 1.0 < soldier_dist_to_box {
+            return;
+        }
+
+        let min = center - half_size;
+        let max = center + half_size;
+        let min_x = (min.x + soldier_radius).min(center.x);
+        let max_x = (max.x - soldier_radius).max(center.x);
+        let min_y = (min.y + soldier_radius).min(center.y);
+        let max_y = (max.y - soldier_radius).max(center.y);
+
+        let target_x = if max_x - min_x > 6.0 {
+            (soldier_pos.x + lateral_offset).clamp(min_x, max_x)
+        } else {
+            soldier_pos.x.clamp(min_x, max_x)
+        };
+        let target_y = if max_y - min_y > 6.0 {
+            (soldier_pos.y + lateral_offset).clamp(min_y, max_y)
+        } else {
+            soldier_pos.y.clamp(min_y, max_y)
+        };
+
+        let candidates = [
+            // North face (-Z)
+            Vec2::new(target_x, min.y - stand_off),
+            // South face (+Z)
+            Vec2::new(target_x, max.y + stand_off),
+            // West face (-X)
+            Vec2::new(min.x - stand_off, target_y),
+            // East face (+X)
+            Vec2::new(max.x + stand_off, target_y),
+        ];
+
+        for cand in candidates {
+            // The obstruction must genuinely lie between `threat_pos` and `cand`
+            if !line_intersects_box(threat_pos, cand, min, max) {
+                continue;
+            }
+            let dist = (cand - soldier_pos).length();
+            if dist > search_radius + 4.0 {
+                continue;
+            }
+            let resolved =
+                resolve_circle_obstacle_collision(cand, soldier_radius, buildings, low_walls);
+            if (resolved - cand).length_squared() > 0.04 {
+                continue;
+            }
+            // Prefer low walls slightly because soldiers can see and shoot over them
+            let score = if is_low_wall {
+                (dist - 1.5).max(0.0)
+            } else {
+                dist
+            };
+            if best_spot.map_or(true, |(_, best_score)| score < best_score) {
+                best_spot = Some((resolved, score));
+            }
+        }
+    };
+
+    for (w_tf, w_col) in low_walls {
+        let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+        evaluate_box(center, w_col.half_size, true);
+    }
+    for (b_tf, b_col) in buildings {
+        let center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+        evaluate_box(center, b_col.half_size, false);
+    }
+
+    best_spot.map(|(spot, _)| spot)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +820,48 @@ mod tests {
             }
         }
         assert!(any_deviated, "At least some moving shots should deviate from exact aim");
+    }
+
+    #[test]
+    fn test_find_cover_position_places_wall_between_soldier_and_threat() {
+        let north_wall_tf = Transform::from_xyz(0.0, 0.375, -8.0);
+        let south_wall_tf = Transform::from_xyz(0.0, 0.375, 8.0);
+        let wall_col = LowWallCollider {
+            half_size: Vec2::new(8.0, 0.5),
+        };
+        let low_walls = [(&north_wall_tf, &wall_col), (&south_wall_tf, &wall_col)];
+
+        // Friendly on south side (0, 12.0) under fire from enemy on north side (0, -10.5)
+        let friendly_cover = find_cover_position(
+            Vec2::new(0.0, 12.0),
+            Vec2::new(0.0, -10.5),
+            &[],
+            &low_walls,
+            SOLDIER_RADIUS,
+            16.0,
+        )
+        .expect("Should find cover behind south courtyard wall");
+        assert!(
+            (friendly_cover.y - 9.35).abs() < 0.1,
+            "Friendly cover spot should be directly behind south wall (z ≈ 9.35), got {:?}",
+            friendly_cover
+        );
+
+        // Enemy on north side (-3.0, -11.5) under fire from friendly on south side (0, 12.0)
+        let enemy_cover = find_cover_position(
+            Vec2::new(-3.0, -11.5),
+            Vec2::new(0.0, 12.0),
+            &[],
+            &low_walls,
+            SOLDIER_RADIUS,
+            16.0,
+        )
+        .expect("Should find cover behind north courtyard wall");
+        assert!(
+            (enemy_cover.y - (-9.35)).abs() < 0.1 && (enemy_cover.x - (-3.0)).abs() < 0.1,
+            "Enemy cover spot should be directly behind north wall (-3.0, -9.35), got {:?}",
+            enemy_cover
+        );
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     apply_shoot_spread, can_see_target, directional_speed_multiplier, find_avoidance_direction,
+    find_cover_position_with_offset, has_low_wall_in_line_of_fire, is_near_low_wall,
     resolve_circle_obstacle_collision,
 };
 use crate::common::types::{GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Team};
@@ -28,16 +29,19 @@ fn compute_formation_target(
             (p_pos - p_facing * 2.5, p_facing, 0.0)
         } else {
             // Alpha wingmen and rear guard follow Alpha Team Leader
-            let (ft1_anchor, ft1_facing) = ft1_lead_info.unwrap_or_else(|| {
-                (p_pos - p_facing * 2.5, p_facing)
-            });
+            let (ft1_anchor, ft1_facing) =
+                ft1_lead_info.unwrap_or_else(|| (p_pos - p_facing * 2.5, p_facing));
             let ft1_right = Vec2::new(-ft1_facing.y, ft1_facing.x);
             let (lateral, behind, angle) = match slot {
                 1 => (-2.2, 1.8, -35.0_f32.to_radians()),
                 2 => (2.2, 1.8, 35.0_f32.to_radians()),
                 _ => (0.0, 3.6, 180.0_f32.to_radians()),
             };
-            (ft1_anchor + ft1_right * lateral - ft1_facing * behind, ft1_facing, angle)
+            (
+                ft1_anchor + ft1_right * lateral - ft1_facing * behind,
+                ft1_facing,
+                angle,
+            )
         }
     } else {
         // 2nd Fire Team (Bravo) follows as trail element of the squad
@@ -46,16 +50,19 @@ fn compute_formation_target(
             (p_pos - p_facing * 7.5, p_facing, 0.0)
         } else {
             // Bravo wingmen and rear security follow Bravo Team Leader
-            let (ft2_anchor, ft2_facing) = ft2_lead_info.unwrap_or_else(|| {
-                (p_pos - p_facing * 7.5, p_facing)
-            });
+            let (ft2_anchor, ft2_facing) =
+                ft2_lead_info.unwrap_or_else(|| (p_pos - p_facing * 7.5, p_facing));
             let ft2_right = Vec2::new(-ft2_facing.y, ft2_facing.x);
             let (lateral, behind, angle) = match slot {
                 1 => (-2.2, 1.8, -35.0_f32.to_radians()),
                 2 => (2.2, 1.8, 35.0_f32.to_radians()),
                 _ => (0.0, 3.6, 180.0_f32.to_radians()),
             };
-            (ft2_anchor + ft2_right * lateral - ft2_facing * behind, ft2_facing, angle)
+            (
+                ft2_anchor + ft2_right * lateral - ft2_facing * behind,
+                ft2_facing,
+                angle,
+            )
         }
     }
 }
@@ -116,12 +123,7 @@ pub fn setup_friendly(
     let friendly_configs = [
         // === 1st Fire Team (Alpha) - Follows Player (Squad Leader) ===
         // Alpha Team Leader: fireteam 1, slot 0 (trails Player directly)
-        (
-            1,
-            0,
-            Vec2::new(0.0, 50.5),
-            Vec2::new(0.0, -1.0),
-        ),
+        (1, 0, Vec2::new(0.0, 50.5), Vec2::new(0.0, -1.0)),
         // Alpha Left Flank: fireteam 1, slot 1
         (
             1,
@@ -137,21 +139,10 @@ pub fn setup_friendly(
             Vec2::new(0.35, -0.94).normalize(),
         ),
         // Alpha Rear Guard: fireteam 1, slot 3 (covers FT1 rear)
-        (
-            1,
-            3,
-            Vec2::new(0.0, 54.1),
-            Vec2::new(0.0, 1.0),
-        ),
-
+        (1, 3, Vec2::new(0.0, 54.1), Vec2::new(0.0, 1.0)),
         // === 2nd Fire Team (Bravo) - Follows 1st Fire Team ===
         // Bravo Team Leader: fireteam 2, slot 0 (trails FT1)
-        (
-            2,
-            0,
-            Vec2::new(0.0, 55.5),
-            Vec2::new(0.0, -1.0),
-        ),
+        (2, 0, Vec2::new(0.0, 55.5), Vec2::new(0.0, -1.0)),
         // Bravo Left Flank: fireteam 2, slot 1
         (
             2,
@@ -167,12 +158,7 @@ pub fn setup_friendly(
             Vec2::new(0.35, -0.94).normalize(),
         ),
         // Bravo Rear Security: fireteam 2, slot 3 (squad rear security facing South)
-        (
-            2,
-            3,
-            Vec2::new(0.0, 57.9),
-            Vec2::new(0.0, 1.0),
-        ),
+        (2, 3, Vec2::new(0.0, 57.9), Vec2::new(0.0, 1.0)),
     ];
 
     for (fireteam, slot, pos, facing) in friendly_configs {
@@ -267,6 +253,15 @@ pub fn update_friendly(
             Without<Enemy>,
         ),
     >,
+    bullets_q: Query<
+        (&Transform, &Bullet),
+        (
+            With<Bullet>,
+            Without<Friendly>,
+            Without<Player>,
+            Without<Enemy>,
+        ),
+    >,
     bullet_assets: Res<BulletAssets>,
     mut gunshot_mutator: MessageMutator<GunshotEvent>,
     mut formation_state: Local<Option<(Vec2, Vec2)>>,
@@ -342,25 +337,40 @@ pub fn update_friendly(
         }
         visible_enemies.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // 2. React to enemy gunfire if no target is currently visible
-        if visible_enemies.is_empty() && friendly.state != FriendlyAiState::Engage {
+        // 2. Detect incoming enemy fire (near-miss bullets or nearby hostile gunshots)
+        let mut under_fire_source: Option<Vec2> = None;
+        for (b_tf, bullet) in &bullets_q {
+            if bullet.team == Team::Enemy {
+                let b_pos = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+                let to_friendly = friendly_pos - b_pos;
+                let dist_sq = to_friendly.length_squared();
+                if dist_sq < 36.0 || (dist_sq < 196.0 && to_friendly.dot(bullet.direction) > 0.0) {
+                    under_fire_source = Some(bullet.origin);
+                    break;
+                }
+            }
+        }
+        if under_fire_source.is_none() {
             for event in &heard_gunshots {
                 if event.shooter_team == Team::Enemy {
                     let to_gunshot = event.position - friendly_pos;
                     let dist = to_gunshot.length();
                     if dist < 50.0 && dist > 0.1 {
-                        // Swivel facing direction toward hostile gunfire to investigate
-                        soldier.facing_dir = to_gunshot.normalize();
+                        under_fire_source = Some(event.position);
                         break;
                     }
                 }
             }
         }
 
-        // 3. State transitions
+        // 3. State transitions (taking fire or spotting an enemy overrules Follow formation)
         if let Some(&(nearest_enemy_pos, _)) = visible_enemies.first() {
             friendly.state = FriendlyAiState::Engage;
             friendly.target_pos = Some(nearest_enemy_pos);
+            friendly.target_lost_timer = 0.0;
+        } else if let Some(threat_pos) = under_fire_source {
+            friendly.state = FriendlyAiState::Engage;
+            friendly.target_pos = Some(threat_pos);
             friendly.target_lost_timer = 0.0;
         } else if friendly.state == FriendlyAiState::Engage {
             friendly.target_lost_timer += dt;
@@ -383,9 +393,72 @@ pub fn update_friendly(
                         soldier.facing_dir = to_target / dist;
                     }
 
-                    // Keep moving toward formation if far out of position while engaging
+                    // Compute per-slot lateral offset along wide cover walls when multiple friendlies are present
+                    let lateral_offset = if friendly_snapshots.len() > 1 {
+                        match (friendly.fireteam, friendly.slot) {
+                            (1, 0) => -0.8,
+                            (1, 1) => -2.5,
+                            (1, 2) => 2.5,
+                            (1, 3) => -4.2,
+                            (2, 0) => 0.8,
+                            (2, 1) => -5.8,
+                            (2, 2) => 4.2,
+                            _ => 5.8,
+                        }
+                    } else {
+                        0.0
+                    };
+
+                    // Taking cover behind an obstruction between soldier and enemy fire overrules formation
                     let mut is_moving = false;
-                    if let Some((p_pos, _, _)) = player_info {
+                    if let Some(cover_spot) = find_cover_position_with_offset(
+                        friendly_pos,
+                        target,
+                        &buildings,
+                        &low_walls,
+                        soldier_radius,
+                        18.0,
+                        lateral_offset,
+                    ) {
+                        let to_cover = cover_spot - friendly_pos;
+                        let dist_to_cover = to_cover.length();
+                        if dist_to_cover > 0.35 {
+                            is_moving = true;
+                            soldier.stance = if dist_to_cover < 1.5 {
+                                Stance::Crouching
+                            } else {
+                                Stance::Standing
+                            };
+                            let desired_move = to_cover / dist_to_cover;
+                            let move_dir = if dist_to_cover < 2.0 {
+                                desired_move
+                            } else {
+                                find_avoidance_direction(
+                                    friendly_pos,
+                                    desired_move,
+                                    &buildings,
+                                    &low_walls,
+                                    soldier_radius,
+                                )
+                            };
+                            let dir_mult =
+                                directional_speed_multiplier(soldier.facing_dir, move_dir);
+                            let speed = friendly.speed * 1.15 * dir_mult;
+                            let next_pos = friendly_pos + move_dir * speed * dt;
+                            let resolved = resolve_circle_obstacle_collision(
+                                next_pos,
+                                soldier_radius,
+                                &buildings,
+                                &low_walls,
+                            );
+                            tf.translation.x = resolved.x;
+                            tf.translation.z = resolved.y;
+                        } else {
+                            // Directly behind cover: crouch low behind the obstruction
+                            soldier.stance = Stance::Crouching;
+                        }
+                    } else if let Some((p_pos, _, _)) = player_info {
+                        // No cover nearby: keep moving toward formation if far out of position
                         let (formation_spot, _, _) = compute_formation_target(
                             friendly.fireteam,
                             friendly.slot,
@@ -414,7 +487,8 @@ pub fn update_friendly(
                             } else {
                                 1.0
                             };
-                            let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                            let dir_mult =
+                                directional_speed_multiplier(soldier.facing_dir, move_dir);
                             let speed = friendly.speed * catch_up * dir_mult;
                             let next_pos = friendly_pos + move_dir * speed * dt;
                             let resolved = resolve_circle_obstacle_collision(
@@ -429,18 +503,12 @@ pub fn update_friendly(
                     }
 
                     let current_pos = Vec2::new(tf.translation.x, tf.translation.z);
-                    let near_low_wall = !is_moving
-                        && low_walls.iter().any(|(w_tf, _)| {
-                            let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
-                            (w_pos - current_pos).length() < 3.0
-                        });
+                    let near_low_wall = is_near_low_wall(current_pos, &low_walls, 2.5)
+                        || has_low_wall_in_line_of_fire(current_pos, target, &low_walls);
 
                     if !is_moving {
-                        if near_low_wall {
-                            // Take cover behind low wall
-                            soldier.stance = Stance::Crouching;
-                        } else if dist < 14.0 {
-                            // Tactical crouch at medium range in open field
+                        if near_low_wall || dist < 14.0 {
+                            // Take cover behind low wall or crouch at medium range
                             soldier.stance = Stance::Crouching;
                         } else {
                             soldier.stance = Stance::Standing;
@@ -449,14 +517,20 @@ pub fn update_friendly(
 
                     // If active weapon is completely out of ammunition and soldier has a sidearm, switch to sidearm
                     if let Some(active) = soldier.inventory.active_weapon() {
-                        if active.ammo.is_completely_empty() && soldier.inventory.has_sidearm() && !soldier.inventory.is_swapping() {
+                        if active.ammo.is_completely_empty()
+                            && soldier.inventory.has_sidearm()
+                            && !soldier.inventory.is_swapping()
+                        {
                             soldier.inventory.start_swap();
                         }
                     }
 
-                    // Fire weapon at target enemy if not swapping
+                    // Fire weapon at visible target enemy if not swapping
                     friendly.shoot_timer.tick(time.delta());
-                    if friendly.shoot_timer.is_finished() && !soldier.inventory.is_swapping() {
+                    if !visible_enemies.is_empty()
+                        && friendly.shoot_timer.is_finished()
+                        && !soldier.inventory.is_swapping()
+                    {
                         let mut should_fire = false;
                         let mut bullet_speed = 45.0;
                         let mut bullet_lifetime = 1.5;
@@ -485,7 +559,8 @@ pub fn update_friendly(
                                 ^ ((friendly.fireteam as u64) << 8)
                                 ^ (current_pos.x.to_bits() as u64)
                                 ^ ((current_pos.y.to_bits() as u64) << 16);
-                            let shot_dir = apply_shoot_spread(soldier.facing_dir, is_moving, spread_seed);
+                            let shot_dir =
+                                apply_shoot_spread(soldier.facing_dir, is_moving, spread_seed);
                             let spawn_pos = current_pos + soldier.facing_dir * 0.85;
                             commands.spawn((
                                 LevelEntity,
@@ -1001,7 +1076,10 @@ mod tests {
 
         let soldier = app.world().get::<Soldier>(friendly_entity).unwrap();
         let weapon = soldier.inventory.active_weapon().unwrap();
-        assert!(weapon.ammo.is_reloading(), "Friendly should start reloading when mag is empty");
+        assert!(
+            weapon.ammo.is_reloading(),
+            "Friendly should start reloading when mag is empty"
+        );
         assert_eq!(weapon.ammo.current_mag, 0);
 
         // No bullets should have been fired
@@ -1103,7 +1181,10 @@ mod tests {
         app.update();
 
         let soldier = app.world().get::<Soldier>(friendly_entity).unwrap();
-        assert!(soldier.inventory.is_swapping(), "Friendly should be swapping to sidearm");
+        assert!(
+            soldier.inventory.is_swapping(),
+            "Friendly should be swapping to sidearm"
+        );
         assert_eq!(
             soldier.inventory.pending_weapon().unwrap().weapon_type,
             crate::common::types::WeaponType::Pistol
@@ -1141,11 +1222,27 @@ mod tests {
             "Squad must spawn exactly 8 friendly members across 2 fire teams"
         );
 
-        let ft1_members: Vec<&Friendly> = friendlies.iter().map(|(f, _, _)| *f).filter(|f| f.fireteam == 1).collect();
-        let ft2_members: Vec<&Friendly> = friendlies.iter().map(|(f, _, _)| *f).filter(|f| f.fireteam == 2).collect();
+        let ft1_members: Vec<&Friendly> = friendlies
+            .iter()
+            .map(|(f, _, _)| *f)
+            .filter(|f| f.fireteam == 1)
+            .collect();
+        let ft2_members: Vec<&Friendly> = friendlies
+            .iter()
+            .map(|(f, _, _)| *f)
+            .filter(|f| f.fireteam == 2)
+            .collect();
 
-        assert_eq!(ft1_members.len(), 4, "1st Fire Team (Alpha) must have 4 members");
-        assert_eq!(ft2_members.len(), 4, "2nd Fire Team (Bravo) must have 4 members");
+        assert_eq!(
+            ft1_members.len(),
+            4,
+            "1st Fire Team (Alpha) must have 4 members"
+        );
+        assert_eq!(
+            ft2_members.len(),
+            4,
+            "2nd Fire Team (Bravo) must have 4 members"
+        );
 
         let mut ft1_slots: Vec<usize> = ft1_members.iter().map(|f| f.slot).collect();
         ft1_slots.sort();
@@ -1156,7 +1253,10 @@ mod tests {
         assert_eq!(ft2_slots, vec![0, 1, 2, 3]);
 
         // FT1 Slot 0 is Alpha Team Leader directly trailing player
-        let ft1_slot0 = friendlies.iter().find(|(f, _, _)| f.fireteam == 1 && f.slot == 0).unwrap();
+        let ft1_slot0 = friendlies
+            .iter()
+            .find(|(f, _, _)| f.fireteam == 1 && f.slot == 0)
+            .unwrap();
         assert_eq!(ft1_slot0.2.translation.x, 0.0);
         assert_eq!(ft1_slot0.2.translation.z, 50.5);
         assert!(
@@ -1165,7 +1265,10 @@ mod tests {
         );
 
         // FT1 Slot 3 is Alpha Rear Guard
-        let ft1_slot3 = friendlies.iter().find(|(f, _, _)| f.fireteam == 1 && f.slot == 3).unwrap();
+        let ft1_slot3 = friendlies
+            .iter()
+            .find(|(f, _, _)| f.fireteam == 1 && f.slot == 3)
+            .unwrap();
         assert_eq!(ft1_slot3.2.translation.x, 0.0);
         assert_eq!(ft1_slot3.2.translation.z, 54.1);
         assert!(
@@ -1174,7 +1277,10 @@ mod tests {
         );
 
         // FT2 Slot 0 is Bravo Leader trailing behind FT1
-        let ft2_slot0 = friendlies.iter().find(|(f, _, _)| f.fireteam == 2 && f.slot == 0).unwrap();
+        let ft2_slot0 = friendlies
+            .iter()
+            .find(|(f, _, _)| f.fireteam == 2 && f.slot == 0)
+            .unwrap();
         assert_eq!(ft2_slot0.2.translation.x, 0.0);
         assert_eq!(ft2_slot0.2.translation.z, 55.5);
         assert!(
@@ -1183,7 +1289,10 @@ mod tests {
         );
 
         // FT2 Slot 3 is squad rear security facing South
-        let ft2_slot3 = friendlies.iter().find(|(f, _, _)| f.fireteam == 2 && f.slot == 3).unwrap();
+        let ft2_slot3 = friendlies
+            .iter()
+            .find(|(f, _, _)| f.fireteam == 2 && f.slot == 3)
+            .unwrap();
         assert_eq!(ft2_slot3.2.translation.x, 0.0);
         assert_eq!(ft2_slot3.2.translation.z, 57.9);
         assert!(
@@ -1452,10 +1561,7 @@ mod tests {
         app.init_state::<crate::common::types::AppState>();
         app.init_resource::<crate::common::types::CurrentLevel>();
         app.init_resource::<ButtonInput<KeyCode>>();
-        app.add_plugins((
-            crate::player::PlayerPlugin,
-            crate::friendly::FriendlyPlugin,
-        ));
+        app.add_plugins((crate::player::PlayerPlugin, crate::friendly::FriendlyPlugin));
         app.add_systems(
             OnEnter(crate::common::types::AppState::InGame),
             crate::world::setup_level_world,
@@ -1633,14 +1739,26 @@ mod tests {
             .world_mut()
             .query::<(&Friendly, &Transform)>()
             .iter(app.world())
-            .map(|(f, tf)| (f.fireteam, f.slot, Vec2::new(tf.translation.x, tf.translation.z)))
+            .map(|(f, tf)| {
+                (
+                    f.fireteam,
+                    f.slot,
+                    Vec2::new(tf.translation.x, tf.translation.z),
+                )
+            })
             .collect();
         assert_eq!(initial_positions.len(), 8);
 
         // Rotate player facing direction 90 deg East, then 180 deg South, while standing still
-        for look_dir in [Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0), Vec2::new(-1.0, 0.0)] {
+        for look_dir in [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.0, 1.0),
+            Vec2::new(-1.0, 0.0),
+        ] {
             {
-                let mut player_q = app.world_mut().query_filtered::<&mut Soldier, With<Player>>();
+                let mut player_q = app
+                    .world_mut()
+                    .query_filtered::<&mut Soldier, With<Player>>();
                 let mut player_soldier = player_q.single_mut(app.world_mut()).unwrap();
                 player_soldier.facing_dir = look_dir;
             }
@@ -1655,7 +1773,13 @@ mod tests {
             .world_mut()
             .query::<(&Friendly, &Transform)>()
             .iter(app.world())
-            .map(|(f, tf)| (f.fireteam, f.slot, Vec2::new(tf.translation.x, tf.translation.z)))
+            .map(|(f, tf)| {
+                (
+                    f.fireteam,
+                    f.slot,
+                    Vec2::new(tf.translation.x, tf.translation.z),
+                )
+            })
             .collect();
 
         for (ft, slot, init_pos) in &initial_positions {
@@ -1673,5 +1797,88 @@ mod tests {
                 moved
             );
         }
+    }
+
+    #[test]
+    fn test_friendly_taking_fire_seeks_cover_behind_wall_overruling_formation() {
+        let mut app = create_test_app();
+
+        // Player is back at z = 18.0 (so FT1 slot 0 formation spot would be z = 20.5)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 18.0),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        // South courtyard wall at z = 8.0 (half_size = 8.0 x 0.5)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.375, 8.0),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(8.0, 0.5),
+            },
+        ));
+
+        // Friendly at (0.0, 13.0) (5m south of wall, 7.5m ahead of formation spot z=20.5)
+        let friendly_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 13.0),
+                Friendly {
+                    fireteam: 1,
+                    slot: 0,
+                    state: FriendlyAiState::Follow,
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 12.0,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    target_pos: None,
+                    target_lost_timer: 0.0,
+                },
+                Team::Player,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        app.add_systems(Update, update_friendly);
+
+        // Enemy fires from north side of courtyard (0.0, -9.5)
+        app.world_mut().write_message(GunshotEvent {
+            position: Vec2::new(0.0, -9.5),
+            shooter_team: Team::Enemy,
+        });
+
+        for _ in 0..15 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let tf = app.world().get::<Transform>(friendly_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(friendly_entity).unwrap();
+
+        // Friendly should overrule formation (z=20.5) and move forward to crouch directly behind the south wall (z ≈ 9.35)
+        assert!(
+            (tf.translation.z - 9.35).abs() < 0.4,
+            "Friendly should move directly behind south wall (z ≈ 9.35) instead of retreating to formation (z=20.5), got z={}",
+            tf.translation.z
+        );
+        assert_eq!(
+            soldier.stance,
+            Stance::Crouching,
+            "Friendly should crouch directly behind the wall"
+        );
     }
 }

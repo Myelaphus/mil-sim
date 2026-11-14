@@ -1,6 +1,7 @@
 use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
-    can_see_target, directional_speed_multiplier, find_avoidance_direction,
+    apply_shoot_spread, can_see_target, directional_speed_multiplier, find_avoidance_direction,
+    find_cover_position, has_low_wall_in_line_of_fire, is_near_low_wall,
     resolve_circle_obstacle_collision,
 };
 use crate::common::types::{
@@ -554,10 +555,7 @@ pub fn update_enemy(
 
                     // 2. Optionally take cover:
                     // If a low wall is within 3.5m, immediately duck behind it
-                    let near_low_wall = low_walls.iter().any(|(w_tf, _)| {
-                        let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
-                        (w_pos - enemy_pos).length() < 3.5
-                    });
+                    let near_low_wall = is_near_low_wall(enemy_pos, &low_walls, 3.5);
 
                     if near_low_wall {
                         soldier.stance = Stance::Crouching;
@@ -625,7 +623,10 @@ pub fn update_enemy(
         // 3. State behaviors
         match enemy.state {
             EnemyAiState::Engage => {
-                let target = player_pos.unwrap_or(enemy_pos);
+                let target = can_see_fireteam_target
+                    .or(enemy.last_known_player_pos)
+                    .or(player_pos)
+                    .unwrap_or(enemy_pos);
                 let to_target = target - enemy_pos;
                 let dist = to_target.length();
 
@@ -633,70 +634,120 @@ pub fn update_enemy(
                     soldier.facing_dir = to_target / dist;
                 }
 
-                // Check proximity to any low wall for cover
-                let near_low_wall = low_walls.iter().any(|(w_tf, _)| {
-                    let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
-                    (w_pos - enemy_pos).length() < 2.5
-                });
-
-                if dist > 14.0 {
-                    // Long-range engagement: drop prone to snipe with high cover profile (80% miss protection)
-                    soldier.stance = Stance::Prone;
-                    let desired_move = soldier.facing_dir;
-                    let move_dir = find_avoidance_direction(
-                        enemy_pos,
-                        desired_move,
-                        &buildings,
-                        &low_walls,
-                        soldier_radius,
-                    );
-                    let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
-                    let crawl_speed = enemy.speed * 0.32 * dir_mult;
-                    let next_pos = enemy_pos + move_dir * crawl_speed * dt;
-                    let resolved = resolve_circle_obstacle_collision(
-                        next_pos,
-                        soldier_radius,
-                        &buildings,
-                        &low_walls,
-                    );
-                    tf.translation.x = resolved.x;
-                    tf.translation.z = resolved.y;
-                } else if dist > 6.0 {
-                    // Medium-long range: advance at standing speed towards player
-                    soldier.stance = Stance::Standing;
-                    let desired_move = soldier.facing_dir;
-                    let move_dir = find_avoidance_direction(
-                        enemy_pos,
-                        desired_move,
-                        &buildings,
-                        &low_walls,
-                        soldier_radius,
-                    );
-                    let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
-                    let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75 * dir_mult) * dt;
-                    let resolved = resolve_circle_obstacle_collision(
-                        next_pos,
-                        soldier_radius,
-                        &buildings,
-                        &low_walls,
-                    );
-                    tf.translation.x = resolved.x;
-                    tf.translation.z = resolved.y;
-                } else if near_low_wall || dist > 3.5 {
-                    // Duck down into crouch behind low wall or medium range
-                    soldier.stance = Stance::Crouching;
+                // Attempt to take cover behind a nearby obstruction between enemy and threat.
+                // Crouching directly behind a low wall avoids going prone and shooting into the wall.
+                let mut is_moving = false;
+                if let Some(cover_spot) = find_cover_position(
+                    enemy_pos,
+                    target,
+                    &buildings,
+                    &low_walls,
+                    soldier_radius,
+                    16.0,
+                ) {
+                    let to_cover = cover_spot - enemy_pos;
+                    let dist_to_cover = to_cover.length();
+                    if dist_to_cover > 0.35 {
+                        is_moving = true;
+                        soldier.stance = if dist_to_cover < 1.5 {
+                            Stance::Crouching
+                        } else {
+                            Stance::Standing
+                        };
+                        let desired_move = to_cover / dist_to_cover;
+                        let move_dir = if dist_to_cover < 2.0 {
+                            desired_move
+                        } else {
+                            find_avoidance_direction(
+                                enemy_pos,
+                                desired_move,
+                                &buildings,
+                                &low_walls,
+                                soldier_radius,
+                            )
+                        };
+                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                        let next_pos = enemy_pos + move_dir * (enemy.speed * dir_mult) * dt;
+                        let resolved = resolve_circle_obstacle_collision(
+                            next_pos,
+                            soldier_radius,
+                            &buildings,
+                            &low_walls,
+                        );
+                        tf.translation.x = resolved.x;
+                        tf.translation.z = resolved.y;
+                    } else {
+                        // Directly behind cover: crouch behind the wall
+                        soldier.stance = Stance::Crouching;
+                    }
                 } else {
-                    soldier.stance = Stance::Standing;
+                    let wall_in_los = is_near_low_wall(enemy_pos, &low_walls, 2.5)
+                        || has_low_wall_in_line_of_fire(enemy_pos, target, &low_walls);
+
+                    if dist > 14.0 && !wall_in_los {
+                        // Long-range engagement in open field (no wall blocking): drop prone
+                        is_moving = true;
+                        soldier.stance = Stance::Prone;
+                        let desired_move = soldier.facing_dir;
+                        let move_dir = find_avoidance_direction(
+                            enemy_pos,
+                            desired_move,
+                            &buildings,
+                            &low_walls,
+                            soldier_radius,
+                        );
+                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                        let crawl_speed = enemy.speed * 0.32 * dir_mult;
+                        let next_pos = enemy_pos + move_dir * crawl_speed * dt;
+                        let resolved = resolve_circle_obstacle_collision(
+                            next_pos,
+                            soldier_radius,
+                            &buildings,
+                            &low_walls,
+                        );
+                        tf.translation.x = resolved.x;
+                        tf.translation.z = resolved.y;
+                    } else if dist > 6.0 && !wall_in_los {
+                        // Medium-long range: advance at standing speed towards target
+                        is_moving = true;
+                        soldier.stance = Stance::Standing;
+                        let desired_move = soldier.facing_dir;
+                        let move_dir = find_avoidance_direction(
+                            enemy_pos,
+                            desired_move,
+                            &buildings,
+                            &low_walls,
+                            soldier_radius,
+                        );
+                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                        let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75 * dir_mult) * dt;
+                        let resolved = resolve_circle_obstacle_collision(
+                            next_pos,
+                            soldier_radius,
+                            &buildings,
+                            &low_walls,
+                        );
+                        tf.translation.x = resolved.x;
+                        tf.translation.z = resolved.y;
+                    } else if wall_in_los || dist > 3.5 {
+                        // Duck down into crouch behind low wall or medium range
+                        soldier.stance = Stance::Crouching;
+                    } else {
+                        soldier.stance = Stance::Standing;
+                    }
                 }
 
                 // If active weapon is completely out of ammunition and soldier has a sidearm, switch to sidearm
                 if let Some(active) = soldier.inventory.active_weapon() {
-                    if active.ammo.is_completely_empty() && soldier.inventory.has_sidearm() && !soldier.inventory.is_swapping() {
+                    if active.ammo.is_completely_empty()
+                        && soldier.inventory.has_sidearm()
+                        && !soldier.inventory.is_swapping()
+                    {
                         soldier.inventory.start_swap();
                     }
                 }
 
-                // Fire at player if not swapping
+                // Fire at target if not swapping
                 enemy.shoot_timer.tick(time.delta());
                 if enemy.shoot_timer.is_finished() && !soldier.inventory.is_swapping() {
                     let mut should_fire = false;
@@ -717,13 +768,21 @@ pub fn update_enemy(
                     if should_fire {
                         enemy.shoot_timer.reset();
 
-                        // If crouched behind a low wall, pop up to standing to shoot over the wall
-                        if near_low_wall {
+                        let current_pos = Vec2::new(tf.translation.x, tf.translation.z);
+                        let behind_low_wall = is_near_low_wall(current_pos, &low_walls, 2.5)
+                            || has_low_wall_in_line_of_fire(current_pos, target, &low_walls);
+
+                        // If behind a low wall, pop up to standing to shoot over the wall
+                        if behind_low_wall {
                             soldier.stance = Stance::Standing;
                         }
 
-                        let spawn_pos = Vec2::new(tf.translation.x, tf.translation.z)
-                            + soldier.facing_dir * 0.85;
+                        let spread_seed = time.elapsed_secs().to_bits() as u64
+                            ^ (current_pos.x.to_bits() as u64)
+                            ^ ((current_pos.y.to_bits() as u64) << 16);
+                        let shot_dir =
+                            apply_shoot_spread(soldier.facing_dir, is_moving, spread_seed);
+                        let spawn_pos = current_pos + soldier.facing_dir * 0.85;
 
                         commands.spawn((
                             LevelEntity,
@@ -733,7 +792,7 @@ pub fn update_enemy(
                                 .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                             Bullet {
                                 origin: spawn_pos,
-                                direction: soldier.facing_dir,
+                                direction: shot_dir,
                                 speed: bullet_speed,
                                 lifetime: bullet_lifetime,
                                 team: Team::Enemy,
@@ -749,56 +808,102 @@ pub fn update_enemy(
                     let to_target = target - enemy_pos;
                     let dist = to_target.length();
 
-                    // Check if near a low wall for tactical cover during investigation
-                    let near_low_wall = low_walls.iter().any(|(w_tf, _)| {
-                        let w_pos = Vec2::new(w_tf.translation.x, w_tf.translation.z);
-                        (w_pos - enemy_pos).length() < 3.0
-                    });
-
-                    if dist > 1.2 {
-                        // If taking cover or near a low wall, crouch-walk for tactical cover; otherwise standing advance
-                        if near_low_wall {
-                            soldier.stance = Stance::Crouching;
-                        } else if soldier.stance != Stance::Crouching
-                            && soldier.stance != Stance::Prone
-                        {
-                            soldier.stance = Stance::Standing;
+                    // If cover is nearby between the enemy and the gunfire source, move to cover and crouch behind it
+                    if let Some(cover_spot) = find_cover_position(
+                        enemy_pos,
+                        target,
+                        &buildings,
+                        &low_walls,
+                        soldier_radius,
+                        16.0,
+                    ) {
+                        if dist > 0.01 {
+                            soldier.facing_dir = to_target / dist;
                         }
-                        let desired_move = to_target / dist;
-                        let move_dir = find_avoidance_direction(
-                            enemy_pos,
-                            desired_move,
-                            &buildings,
-                            &low_walls,
-                            soldier_radius,
-                        );
-                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
-                        soldier.facing_dir = move_dir;
-                        let base_speed = match soldier.stance {
-                            Stance::Standing => enemy.speed,
-                            Stance::Crouching => enemy.speed * 0.6,
-                            Stance::Prone => enemy.speed * 0.3,
-                        };
-                        let speed = base_speed * dir_mult;
-                        let next_pos = enemy_pos + move_dir * speed * dt;
-                        let resolved = resolve_circle_obstacle_collision(
-                            next_pos,
-                            soldier_radius,
-                            &buildings,
-                            &low_walls,
-                        );
-                        tf.translation.x = resolved.x;
-                        tf.translation.z = resolved.y;
-                    } else {
-                        // At last known position: crouch low, look around and search
                         soldier.stance = Stance::Crouching;
-                        enemy.investigate_timer.tick(time.delta());
-                        let scan_angle = time.elapsed_secs() * 3.0;
-                        soldier.facing_dir = Vec2::new(scan_angle.cos(), scan_angle.sin());
+                        let to_cover = cover_spot - enemy_pos;
+                        let dist_to_cover = to_cover.length();
+                        if dist_to_cover > 0.35 {
+                            let desired_move = to_cover / dist_to_cover;
+                            let move_dir = if dist_to_cover < 2.0 {
+                                desired_move
+                            } else {
+                                find_avoidance_direction(
+                                    enemy_pos,
+                                    desired_move,
+                                    &buildings,
+                                    &low_walls,
+                                    soldier_radius,
+                                )
+                            };
+                            let dir_mult =
+                                directional_speed_multiplier(soldier.facing_dir, move_dir);
+                            let speed = enemy.speed * 0.85 * dir_mult;
+                            let next_pos = enemy_pos + move_dir * speed * dt;
+                            let resolved = resolve_circle_obstacle_collision(
+                                next_pos,
+                                soldier_radius,
+                                &buildings,
+                                &low_walls,
+                            );
+                            tf.translation.x = resolved.x;
+                            tf.translation.z = resolved.y;
+                        } else {
+                            enemy.investigate_timer.tick(time.delta());
+                            if enemy.investigate_timer.is_finished() {
+                                enemy.last_known_player_pos = None;
+                                enemy.state = EnemyAiState::Search;
+                            }
+                        }
+                    } else {
+                        let near_low_wall = is_near_low_wall(enemy_pos, &low_walls, 3.0);
 
-                        if enemy.investigate_timer.is_finished() {
-                            enemy.last_known_player_pos = None;
-                            enemy.state = EnemyAiState::Search;
+                        if dist > 1.2 {
+                            // If taking cover or near a low wall, crouch-walk for tactical cover; otherwise standing advance
+                            if near_low_wall {
+                                soldier.stance = Stance::Crouching;
+                            } else if soldier.stance != Stance::Crouching
+                                && soldier.stance != Stance::Prone
+                            {
+                                soldier.stance = Stance::Standing;
+                            }
+                            let desired_move = to_target / dist;
+                            let move_dir = find_avoidance_direction(
+                                enemy_pos,
+                                desired_move,
+                                &buildings,
+                                &low_walls,
+                                soldier_radius,
+                            );
+                            let dir_mult =
+                                directional_speed_multiplier(soldier.facing_dir, move_dir);
+                            soldier.facing_dir = move_dir;
+                            let base_speed = match soldier.stance {
+                                Stance::Standing => enemy.speed,
+                                Stance::Crouching => enemy.speed * 0.6,
+                                Stance::Prone => enemy.speed * 0.3,
+                            };
+                            let speed = base_speed * dir_mult;
+                            let next_pos = enemy_pos + move_dir * speed * dt;
+                            let resolved = resolve_circle_obstacle_collision(
+                                next_pos,
+                                soldier_radius,
+                                &buildings,
+                                &low_walls,
+                            );
+                            tf.translation.x = resolved.x;
+                            tf.translation.z = resolved.y;
+                        } else {
+                            // At last known position: crouch low, look around and search
+                            soldier.stance = Stance::Crouching;
+                            enemy.investigate_timer.tick(time.delta());
+                            let scan_angle = time.elapsed_secs() * 3.0;
+                            soldier.facing_dir = Vec2::new(scan_angle.cos(), scan_angle.sin());
+
+                            if enemy.investigate_timer.is_finished() {
+                                enemy.last_known_player_pos = None;
+                                enemy.state = EnemyAiState::Search;
+                            }
                         }
                     }
                 } else {
@@ -812,46 +917,46 @@ pub fn update_enemy(
                     // Hold north-side courtyard overwatch facing South
                     soldier.facing_dir = Vec2::new(0.0, 1.0);
                 } else {
-                let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
-                let to_wp = target_wp - enemy_pos;
-                let dist = to_wp.length();
+                    let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
+                    let to_wp = target_wp - enemy_pos;
+                    let dist = to_wp.length();
 
-                // Stuck watchdog: track displacement to ensure AI never remains pinned against obstacles
-                let moved_dist = (enemy_pos - enemy.last_pos).length();
-                if moved_dist < 0.25 * dt * enemy.speed {
-                    enemy.stuck_timer += dt;
-                } else {
-                    enemy.stuck_timer = 0.0;
-                    enemy.last_pos = enemy_pos;
-                }
+                    // Stuck watchdog: track displacement to ensure AI never remains pinned against obstacles
+                    let moved_dist = (enemy_pos - enemy.last_pos).length();
+                    if moved_dist < 0.25 * dt * enemy.speed {
+                        enemy.stuck_timer += dt;
+                    } else {
+                        enemy.stuck_timer = 0.0;
+                        enemy.last_pos = enemy_pos;
+                    }
 
-                // If reached waypoint OR stuck for > 1.5 seconds, advance to the next patrol waypoint
-                if dist < 1.6 || enemy.stuck_timer > 1.5 {
-                    enemy.current_waypoint_idx =
-                        (enemy.current_waypoint_idx + 1) % ENEMY_WAYPOINTS.len();
-                    enemy.stuck_timer = 0.0;
-                    enemy.last_pos = enemy_pos;
-                } else {
-                    let desired_move = to_wp / dist;
-                    let move_dir = find_avoidance_direction(
-                        enemy_pos,
-                        desired_move,
-                        &buildings,
-                        &low_walls,
-                        soldier_radius,
-                    );
-                    let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
-                    soldier.facing_dir = move_dir;
-                    let next_pos = enemy_pos + move_dir * (enemy.speed * dir_mult) * dt;
-                    let resolved = resolve_circle_obstacle_collision(
-                        next_pos,
-                        soldier_radius,
-                        &buildings,
-                        &low_walls,
-                    );
-                    tf.translation.x = resolved.x;
-                    tf.translation.z = resolved.y;
-                }
+                    // If reached waypoint OR stuck for > 1.5 seconds, advance to the next patrol waypoint
+                    if dist < 1.6 || enemy.stuck_timer > 1.5 {
+                        enemy.current_waypoint_idx =
+                            (enemy.current_waypoint_idx + 1) % ENEMY_WAYPOINTS.len();
+                        enemy.stuck_timer = 0.0;
+                        enemy.last_pos = enemy_pos;
+                    } else {
+                        let desired_move = to_wp / dist;
+                        let move_dir = find_avoidance_direction(
+                            enemy_pos,
+                            desired_move,
+                            &buildings,
+                            &low_walls,
+                            soldier_radius,
+                        );
+                        let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
+                        soldier.facing_dir = move_dir;
+                        let next_pos = enemy_pos + move_dir * (enemy.speed * dir_mult) * dt;
+                        let resolved = resolve_circle_obstacle_collision(
+                            next_pos,
+                            soldier_radius,
+                            &buildings,
+                            &low_walls,
+                        );
+                        tf.translation.x = resolved.x;
+                        tf.translation.z = resolved.y;
+                    }
                 }
             }
         }
@@ -1973,7 +2078,9 @@ mod tests {
             "Soldier component should be removed on death"
         );
         assert!(
-            app.world().get::<crate::common::types::Corpse>(player_entity).is_some(),
+            app.world()
+                .get::<crate::common::types::Corpse>(player_entity)
+                .is_some(),
             "Victim should gain Corpse component"
         );
 
@@ -2004,8 +2111,15 @@ mod tests {
         app.update();
 
         // 1. Courtyard map has 0 buildings and 4 waist-high walls arranged in a square
-        let building_count = app.world_mut().query::<&Building>().iter(app.world()).count();
-        assert_eq!(building_count, 0, "Level 3 courtyard should have no buildings");
+        let building_count = app
+            .world_mut()
+            .query::<&Building>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            building_count, 0,
+            "Level 3 courtyard should have no buildings"
+        );
 
         let wall_positions: Vec<Vec2> = app
             .world_mut()
@@ -2013,10 +2127,20 @@ mod tests {
             .iter(app.world())
             .map(|tf| Vec2::new(tf.translation.x, tf.translation.z))
             .collect();
-        assert_eq!(wall_positions.len(), 4, "Level 3 courtyard should have 4 low walls");
+        assert_eq!(
+            wall_positions.len(),
+            4,
+            "Level 3 courtyard should have 4 low walls"
+        );
 
-        let north_z = wall_positions.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-        let south_z = wall_positions.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        let north_z = wall_positions
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::INFINITY, f32::min);
+        let south_z = wall_positions
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max);
         let courtyard_span = south_z - north_z;
         let rifle_range = crate::common::types::Weapon::rifle().bullet_speed()
             * crate::common::types::Weapon::rifle().bullet_lifetime();
@@ -2031,9 +2155,19 @@ mod tests {
             .world_mut()
             .query::<(&Enemy, &Transform, &Soldier)>()
             .iter(app.world())
-            .map(|(e, tf, s)| (Vec2::new(tf.translation.x, tf.translation.z), s.facing_dir, e.vision_range))
+            .map(|(e, tf, s)| {
+                (
+                    Vec2::new(tf.translation.x, tf.translation.z),
+                    s.facing_dir,
+                    e.vision_range,
+                )
+            })
             .collect();
-        assert_eq!(enemies.len(), 4, "Level 3 should spawn a 4-man enemy fire team");
+        assert_eq!(
+            enemies.len(),
+            4,
+            "Level 3 should spawn a 4-man enemy fire team"
+        );
 
         let player_pos = app
             .world_mut()
@@ -2056,6 +2190,118 @@ mod tests {
                 "Friendly squad should start far enough south to not be in immediate firing range (dist={}, vision={})",
                 dist_to_player,
                 vision_range
+            );
+        }
+    }
+
+    #[test]
+    fn test_courtyard_enemy_crouches_behind_wall_instead_of_prone_and_fires_over_wall() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+        app.insert_resource(CurrentLevel::Level3);
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+
+        // North courtyard wall at z = -8.0 (half_size = 8.0 x 0.5)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.375, -8.0),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(8.0, 0.5),
+            },
+        ));
+
+        // Enemy on north side at (-3.0, -11.5) facing South
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(-3.0, 0.05, -11.5),
+                Enemy {
+                    state: EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.25, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::new(-3.0, -11.5),
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        // Player on south side of courtyard at (-3.0, 9.5) (21m away -> > 14m, within 24m vision)
+        app.world_mut().spawn((
+            Transform::from_xyz(-3.0, 0.05, 9.5),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Crouching,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        app.add_systems(Update, update_enemy);
+
+        // Advance several frames so enemy moves directly behind the north wall and fires
+        for _ in 0..20 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let tf = app.world().get::<Transform>(enemy_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+
+        // Enemy moved directly behind the north wall (z ≈ -9.35) and is NOT Prone
+        assert!(
+            (tf.translation.z - (-9.35)).abs() < 0.4,
+            "Enemy should move directly behind the north wall (z ≈ -9.35), got z={}",
+            tf.translation.z
+        );
+        assert_ne!(
+            soldier.stance,
+            Stance::Prone,
+            "Enemy behind low wall must not go Prone (which would cause shots to hit the wall)"
+        );
+
+        // Verify spawned bullets have Standing shooter_stance so they clear the low wall
+        let bullets: Vec<&Bullet> = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .collect();
+        assert!(
+            !bullets.is_empty(),
+            "Enemy should fire across the courtyard"
+        );
+        for b in bullets {
+            assert_eq!(
+                b.shooter_stance,
+                Stance::Standing,
+                "Bullets fired from behind a low wall must pop up to Standing to clear the wall"
             );
         }
     }
