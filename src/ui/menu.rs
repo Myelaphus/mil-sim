@@ -1,4 +1,4 @@
-use crate::common::types::{AppState, CurrentLevel, LevelEntity};
+use crate::common::types::{AppState, CurrentLevel, LevelEntity, SquadCommand};
 use crate::enemy::ai::Enemy;
 use crate::player::Player;
 use bevy::prelude::*;
@@ -475,14 +475,18 @@ fn spawn_outcome_banner(commands: &mut Commands, title: &str, subtitle: &str, ac
         });
 }
 
-// Despawns all level-specific entities when exiting InGame state
+// Despawns all level-specific entities and resets tactical state when exiting InGame state
 pub fn cleanup_level(
     mut commands: Commands,
     mut level_end: ResMut<LevelEndManager>,
+    mut squad_command: Option<ResMut<SquadCommand>>,
     level_entities_q: Query<Entity, With<LevelEntity>>,
 ) {
     level_end.timer = None;
     level_end.outcome = None;
+    if let Some(ref mut cmd) = squad_command {
+        **cmd = SquadCommand::Formation;
+    }
 
     for entity in &level_entities_q {
         commands.entity(entity).despawn();
@@ -674,6 +678,7 @@ mod tests {
     fn test_cleanup_level_removes_all_level_entities() {
         let mut app = App::new();
         app.init_resource::<LevelEndManager>();
+        app.insert_resource(SquadCommand::FlankLeft);
 
         let e1 = app.world_mut().spawn(LevelEntity).id();
         let e2 = app.world_mut().spawn(LevelEntity).id();
@@ -687,5 +692,10 @@ mod tests {
         assert!(app.world().get_entity(e2).is_err());
         assert!(app.world().get_entity(e3).is_err());
         assert!(app.world().get_entity(regular).is_ok());
+        assert_eq!(
+            *app.world().resource::<SquadCommand>(),
+            SquadCommand::Formation,
+            "cleanup_level must reset SquadCommand to Formation for a clean slate"
+        );
     }
 }

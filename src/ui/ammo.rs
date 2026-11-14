@@ -1,9 +1,12 @@
 use bevy::prelude::*;
-use crate::common::types::{LevelEntity, Soldier, MAG_CAPACITY};
+use crate::common::types::{LevelEntity, Soldier, SquadCommand, MAG_CAPACITY};
 use crate::player::Player;
 
 #[derive(Component)]
 pub struct AmmoHudRoot;
+
+#[derive(Component)]
+pub struct SquadOrderText;
 
 #[derive(Component)]
 pub struct EquippedWeaponText;
@@ -142,12 +145,24 @@ pub fn setup_ammo_ui(mut commands: Commands) {
                 },
                 TextColor(Color::srgb(0.48, 0.58, 0.68)),
             ));
+
+            // Squad tactical order indicator text
+            root.spawn((
+                SquadOrderText,
+                Text::new("ORDER: FORMATION  •  [Q/E] FLANK"),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.55, 0.78, 0.95)),
+            ));
         });
 }
 
 // Updates player ammunition readout, reload progress bar, and status messages
 pub fn update_ammo_ui(
     player_q: Query<&Soldier, With<Player>>,
+    squad_command: Option<Res<SquadCommand>>,
     mut weapon_name_q: Query<
         &mut Text,
         (
@@ -156,6 +171,7 @@ pub fn update_ammo_ui(
             Without<AmmoReserveText>,
             Without<ReloadStatusText>,
             Without<WeaponCapacityText>,
+            Without<SquadOrderText>,
         ),
     >,
     mut capacity_q: Query<
@@ -166,6 +182,7 @@ pub fn update_ammo_ui(
             Without<AmmoReserveText>,
             Without<ReloadStatusText>,
             Without<EquippedWeaponText>,
+            Without<SquadOrderText>,
         ),
     >,
     mut ammo_count_q: Query<
@@ -176,6 +193,7 @@ pub fn update_ammo_ui(
             Without<ReloadStatusText>,
             Without<EquippedWeaponText>,
             Without<WeaponCapacityText>,
+            Without<SquadOrderText>,
         ),
     >,
     mut reserve_q: Query<
@@ -186,6 +204,7 @@ pub fn update_ammo_ui(
             Without<ReloadStatusText>,
             Without<EquippedWeaponText>,
             Without<WeaponCapacityText>,
+            Without<SquadOrderText>,
         ),
     >,
     mut status_q: Query<
@@ -196,10 +215,39 @@ pub fn update_ammo_ui(
             Without<AmmoReserveText>,
             Without<EquippedWeaponText>,
             Without<WeaponCapacityText>,
+            Without<SquadOrderText>,
+        ),
+    >,
+    mut order_q: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<SquadOrderText>,
+            Without<ReloadStatusText>,
+            Without<AmmoCountText>,
+            Without<AmmoReserveText>,
+            Without<EquippedWeaponText>,
+            Without<WeaponCapacityText>,
         ),
     >,
     mut bar_q: Query<(&mut Node, &mut BackgroundColor), With<ReloadProgressBar>>,
 ) {
+    let cmd = squad_command.as_deref().copied().unwrap_or_default();
+    for (mut text, mut color) in &mut order_q {
+        match cmd {
+            SquadCommand::Formation => {
+                **text = "ORDER: FORMATION  •  [Q/E] FLANK".to_string();
+                color.0 = Color::srgb(0.55, 0.78, 0.95);
+            }
+            SquadCommand::FlankLeft => {
+                **text = "ORDER: FLANK LEFT  •  [G] REGROUP".to_string();
+                color.0 = Color::srgb(1.0, 0.78, 0.25);
+            }
+            SquadCommand::FlankRight => {
+                **text = "ORDER: FLANK RIGHT  •  [G] REGROUP".to_string();
+                color.0 = Color::srgb(1.0, 0.78, 0.25);
+            }
+        }
+    }
     let Ok(player_soldier) = player_q.single() else {
         // Player is dead / not in game
         for mut text in &mut weapon_name_q {

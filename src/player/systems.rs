@@ -3,7 +3,9 @@ use crate::common::geometry::{
     apply_shoot_spread, directional_speed_multiplier, line_intersects_box,
     resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
-use crate::common::types::{GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Team};
+use crate::common::types::{
+    GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, SquadCommand, Stance, Team,
+};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
@@ -66,10 +68,30 @@ pub fn update_player(
     low_walls_q: Query<(&Transform, &LowWallCollider), Without<Player>>,
     other_soldiers_q: Query<&Transform, (With<Soldier>, Without<Player>)>,
     mut gunshot_writer: MessageWriter<GunshotEvent>,
+    mut squad_command: Option<ResMut<SquadCommand>>,
 ) {
     let Ok((mut soldier_tf, mut soldier)) = player_q.single_mut() else {
         return;
     };
+
+    // 0. Squad tactical orders (Q: Flank Left, E: Flank Right, G: Regroup to Formation)
+    if let Some(ref mut cmd) = squad_command {
+        if keyboard_input.just_pressed(KeyCode::KeyQ) {
+            **cmd = if **cmd == SquadCommand::FlankLeft {
+                SquadCommand::Formation
+            } else {
+                SquadCommand::FlankLeft
+            };
+        } else if keyboard_input.just_pressed(KeyCode::KeyE) {
+            **cmd = if **cmd == SquadCommand::FlankRight {
+                SquadCommand::Formation
+            } else {
+                SquadCommand::FlankRight
+            };
+        } else if keyboard_input.just_pressed(KeyCode::KeyG) {
+            **cmd = SquadCommand::Formation;
+        }
+    }
 
     // 1. Stance toggles (C for crouch, V for prone) & visual scale feedback
     if keyboard_input.just_pressed(KeyCode::KeyC) {
@@ -524,5 +546,38 @@ mod tests {
             any_spread,
             "Moving shots should apply angular spread penalty"
         );
+    }
+
+    #[test]
+    fn test_player_squad_flank_commands_q_e_g() {
+        let mut app = create_player_test_app();
+        app.init_resource::<SquadCommand>();
+
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 0.0),
+            Player,
+            Soldier::default(),
+        ));
+
+        // Initially in Formation
+        assert_eq!(*app.world().resource::<SquadCommand>(), SquadCommand::Formation);
+
+        // Press Q -> FlankLeft
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyQ);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+        assert_eq!(*app.world().resource::<SquadCommand>(), SquadCommand::FlankLeft);
+
+        // Press E -> FlankRight
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyE);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+        assert_eq!(*app.world().resource::<SquadCommand>(), SquadCommand::FlankRight);
+
+        // Press G -> Regroup to Formation
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::KeyG);
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
+        assert_eq!(*app.world().resource::<SquadCommand>(), SquadCommand::Formation);
     }
 }

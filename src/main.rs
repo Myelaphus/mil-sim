@@ -30,6 +30,7 @@ fn main() {
         }))
         .init_state::<AppState>()
         .init_resource::<common::types::CurrentLevel>()
+        .init_resource::<common::types::SquadCommand>()
         .add_plugins((
             WorldPlugin,
             FogPlugin,

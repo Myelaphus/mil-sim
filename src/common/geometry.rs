@@ -595,6 +595,80 @@ pub fn find_cover_position_with_offset(
     best_spot.map(|(spot, _)| spot)
 }
 
+/// Returns true if the shooter at `shooter_pos` has a clear, unobstructed line of fire to `target_pos`
+/// that is not blocked by any building OR any waist-high low wall.
+pub fn has_clear_shot_past_cover(
+    shooter_pos: Vec2,
+    target_pos: Vec2,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+) -> bool {
+    if has_low_wall_in_line_of_fire(shooter_pos, target_pos, low_walls) {
+        return false;
+    }
+    for (b_tf, b_col) in buildings {
+        let center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+        let min = center - b_col.half_size;
+        let max = center + b_col.half_size;
+        if line_intersects_box(shooter_pos, target_pos, min, max) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Computes the next flanking waypoint along cover towards an enfilade position (perpendicular to
+/// enemy cover) where the flanking soldier has a clear, unobstructed shot on `enemy_pos`.
+pub fn compute_flank_waypoint(
+    soldier_pos: Vec2,
+    enemy_pos: Vec2,
+    flank_right: bool,
+    slot: usize,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+    soldier_radius: f32,
+) -> Vec2 {
+    // Determine outer lateral bounds of cover structures in the engagement area
+    let mut min_x = enemy_pos.x - 8.0;
+    let mut max_x = enemy_pos.x + 8.0;
+
+    for (w_tf, w_col) in low_walls {
+        let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+        if (center - enemy_pos).length() < 30.0 || (center - soldier_pos).length() < 30.0 {
+            min_x = min_x.min(center.x - w_col.half_size.x);
+            max_x = max_x.max(center.x + w_col.half_size.x);
+        }
+    }
+    for (b_tf, b_col) in buildings {
+        let center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+        if (center - enemy_pos).length() < 30.0 || (center - soldier_pos).length() < 30.0 {
+            min_x = min_x.min(center.x - b_col.half_size.x);
+            max_x = max_x.max(center.x + b_col.half_size.x);
+        }
+    }
+
+    let stand_off = soldier_radius + 0.55;
+    let flank_x = if flank_right {
+        max_x + stand_off
+    } else {
+        min_x - stand_off
+    };
+
+    // Stagger slots slightly near the enemy's depth so flanking fire team members don't stack
+    let slot_offset = (slot as f32 - 1.5) * 1.3;
+    let target_y = enemy_pos.y + slot_offset * 0.4;
+    let final_spot = Vec2::new(flank_x, target_y);
+
+    // Stage 1: Move laterally behind current cover out to the flank corridor (`flank_x`) first
+    // before advancing towards the enemy depth (`target_y`), so flankers don't cut across the open center.
+    if (soldier_pos.x - flank_x).abs() > 2.0 && (soldier_pos.y - enemy_pos.y).abs() > 4.0 {
+        let corner = Vec2::new(flank_x, soldier_pos.y);
+        resolve_circle_obstacle_collision(corner, soldier_radius, buildings, low_walls)
+    } else {
+        resolve_circle_obstacle_collision(final_spot, soldier_radius, buildings, low_walls)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

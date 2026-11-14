@@ -25,6 +25,14 @@ pub enum CurrentLevel {
     Level3,
 }
 
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SquadCommand {
+    #[default]
+    Formation,
+    FlankLeft,
+    FlankRight,
+}
+
 #[derive(Component)]
 pub struct LevelEntity;
 
