@@ -311,7 +311,42 @@ impl Inventory {
     }
 }
 
+pub const SUPPRESSION_MAX: f32 = 1.5;
+pub const SUPPRESSION_ENTER_THRESHOLD: f32 = 1.0;
+pub const SUPPRESSION_EXIT_THRESHOLD: f32 = 0.5;
+pub const SUPPRESSION_DECAY_PER_SEC: f32 = 0.35;
+pub const SUPPRESSION_NEAR_MISS_AMOUNT: f32 = 0.30;
+pub const SUPPRESSION_COVER_HIT_AMOUNT: f32 = 0.35;
+pub const SUPPRESSION_RADIUS: f32 = 3.5;
+
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct Suppression {
+    pub value: f32,
+    pub suppressed: bool,
+}
+
+impl Suppression {
+    pub fn add(&mut self, amount: f32) {
+        self.value = (self.value + amount).min(SUPPRESSION_MAX);
+        if self.value >= SUPPRESSION_ENTER_THRESHOLD {
+            self.suppressed = true;
+        }
+    }
+
+    pub fn decay(&mut self, dt: f32) {
+        self.value = (self.value - SUPPRESSION_DECAY_PER_SEC * dt).max(0.0);
+        if self.value <= SUPPRESSION_EXIT_THRESHOLD {
+            self.suppressed = false;
+        }
+    }
+
+    pub fn is_suppressed(&self) -> bool {
+        self.suppressed
+    }
+}
+
 #[derive(Component, Debug, Clone)]
+#[require(Suppression)]
 pub struct Soldier {
     pub facing_dir: Vec2,
     pub shoot_cooldown: Timer,
@@ -501,6 +536,32 @@ mod tests {
         inv.tick(std::time::Duration::from_millis(2100));
         assert_eq!(inv.active_weapon().unwrap().weapon_type, WeaponType::Rifle);
         assert_eq!(inv.active_weapon().unwrap().ammo.current_mag, 30); // Rifle ammo preserved!
+    }
+
+    #[test]
+    fn test_suppression_threshold_hysteresis_and_decay() {
+        let mut sup = Suppression::default();
+        assert!(!sup.is_suppressed());
+
+        // 3 near-misses (0.90) is just below the 1.0 threshold
+        sup.add(SUPPRESSION_NEAR_MISS_AMOUNT);
+        sup.add(SUPPRESSION_NEAR_MISS_AMOUNT);
+        sup.add(SUPPRESSION_NEAR_MISS_AMOUNT);
+        assert!(!sup.is_suppressed());
+
+        // 4th near-miss crosses 1.0 -> enters suppressed state
+        sup.add(SUPPRESSION_NEAR_MISS_AMOUNT);
+        assert!(sup.is_suppressed());
+
+        // Hysteresis: decaying to 0.65 (> 0.5 exit threshold) keeps soldier suppressed
+        sup.decay(1.5);
+        assert!(sup.value > SUPPRESSION_EXIT_THRESHOLD);
+        assert!(sup.is_suppressed());
+
+        // Decaying below 0.5 exits suppressed state
+        sup.decay(1.0);
+        assert!(sup.value <= SUPPRESSION_EXIT_THRESHOLD);
+        assert!(!sup.is_suppressed());
     }
 }
 

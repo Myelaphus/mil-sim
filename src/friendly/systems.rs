@@ -4,7 +4,9 @@ use crate::common::geometry::{
     find_cover_position_with_offset, has_low_wall_in_line_of_fire, is_near_low_wall,
     resolve_circle_obstacle_collision,
 };
-use crate::common::types::{GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Team};
+use crate::common::types::{
+    GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, Stance, Suppression, Team,
+};
 use crate::enemy::ai::Enemy;
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::friendly::ai::{Friendly, FriendlyAiState};
@@ -230,7 +232,7 @@ pub fn update_friendly(
     mut commands: Commands,
     time: Res<Time>,
     mut friendly_q: Query<
-        (&mut Transform, &mut Friendly, &mut Soldier),
+        (&mut Transform, &mut Friendly, &mut Soldier, &mut Suppression),
         (With<Friendly>, Without<Player>, Without<Enemy>),
     >,
     player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Friendly>, Without<Enemy>)>,
@@ -295,7 +297,7 @@ pub fn update_friendly(
     // Capture snapshot of living friendlies to coordinate squad and fire team following
     let friendly_snapshots: Vec<(usize, usize, Vec2)> = friendly_q
         .iter()
-        .map(|(tf, f, _)| {
+        .map(|(tf, f, _, _)| {
             (
                 f.fireteam,
                 f.slot,
@@ -314,8 +316,9 @@ pub fn update_friendly(
 
     let heard_gunshots: Vec<GunshotEvent> = gunshot_mutator.read().map(|e| *e).collect();
 
-    for (mut tf, mut friendly, mut soldier) in &mut friendly_q {
+    for (mut tf, mut friendly, mut soldier, mut suppression) in &mut friendly_q {
         soldier.inventory.tick(time.delta());
+        suppression.decay(dt);
         let friendly_pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         // 1. Target acquisition: scan vision cone for living enemies in line of sight
@@ -525,9 +528,12 @@ pub fn update_friendly(
                         }
                     }
 
-                    // Fire weapon at visible target enemy if not swapping
+                    // Fire weapon at visible target enemy if not swapping and not pinned behind cover by suppression
                     friendly.shoot_timer.tick(time.delta());
+                    let pinned_behind_cover =
+                        !is_moving && near_low_wall && suppression.is_suppressed();
                     if !visible_enemies.is_empty()
+                        && !pinned_behind_cover
                         && friendly.shoot_timer.is_finished()
                         && !soldier.inventory.is_swapping()
                     {

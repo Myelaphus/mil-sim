@@ -2,7 +2,8 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use crate::common::geometry::line_intersects_box;
 use crate::common::types::{
-    BloodDecal, Corpse, LevelEntity, Soldier, Stance, Team, BULLET_RADIUS, SOLDIER_RADIUS,
+    BloodDecal, Corpse, LevelEntity, Soldier, Stance, Suppression, Team, BULLET_RADIUS,
+    SOLDIER_RADIUS, SUPPRESSION_COVER_HIT_AMOUNT, SUPPRESSION_NEAR_MISS_AMOUNT, SUPPRESSION_RADIUS,
     WORLD_HALF_SIZE,
 };
 use crate::enemy::ai::Enemy;
@@ -10,7 +11,13 @@ use crate::friendly::Friendly;
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
 
+#[derive(Component, Default)]
+pub struct BulletSuppressionTracker {
+    pub suppressed_entities: Vec<Entity>,
+}
+
 #[derive(Component)]
+#[require(BulletSuppressionTracker)]
 pub struct Bullet {
     pub origin: Vec2,
     pub direction: Vec2,
@@ -42,18 +49,22 @@ pub fn update_bullets(
     mut commands: Commands,
     time: Res<Time>,
     corpse_assets: Res<CorpseAssets>,
-    mut bullet_q: Query<(Entity, &mut Transform, &mut Bullet)>,
+    mut bullet_q: Query<(Entity, &mut Transform, &mut Bullet, &mut BulletSuppressionTracker)>,
     buildings_q: Query<(&Transform, &BuildingCollider), (With<Building>, Without<Bullet>)>,
     low_walls_q: Query<(&Transform, &LowWallCollider), (With<LowWall>, Without<Bullet>)>,
-    characters_q: Query<(Entity, &Transform, &Team, &Soldier), Without<Bullet>>,
+    mut characters_q: Query<
+        (Entity, &Transform, &Team, &Soldier, &mut Suppression),
+        Without<Bullet>,
+    >,
 ) {
     let dt = time.delta_secs();
     let soldier_radius = SOLDIER_RADIUS;
     let bullet_radius = BULLET_RADIUS;
     let hit_dist_sq = (soldier_radius + bullet_radius) * (soldier_radius + bullet_radius);
+    let suppression_dist_sq = SUPPRESSION_RADIUS * SUPPRESSION_RADIUS;
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
 
-    for (b_entity, mut tf, mut bullet) in &mut bullet_q {
+    for (b_entity, mut tf, mut bullet, mut sup_tracker) in &mut bullet_q {
         // Lifetime check
         if bullet.lifetime <= 0.0 {
             commands.entity(b_entity).despawn();
@@ -85,6 +96,17 @@ pub fn update_bullets(
             }
         }
         if hit_building {
+            for (char_entity, char_tf, char_team, _, mut suppression) in &mut characters_q {
+                if bullet.team != *char_team
+                    && !sup_tracker.suppressed_entities.contains(&char_entity)
+                {
+                    let char_pos = Vec2::new(char_tf.translation.x, char_tf.translation.z);
+                    if (bullet_pos - char_pos).length_squared() <= suppression_dist_sq {
+                        suppression.add(SUPPRESSION_COVER_HIT_AMOUNT);
+                        sup_tracker.suppressed_entities.push(char_entity);
+                    }
+                }
+            }
             commands.entity(b_entity).despawn();
             continue;
         }
@@ -104,14 +126,38 @@ pub fn update_bullets(
                 }
             }
             if hit_low_wall {
+                for (char_entity, char_tf, char_team, _, mut suppression) in &mut characters_q {
+                    if bullet.team != *char_team
+                        && !sup_tracker.suppressed_entities.contains(&char_entity)
+                    {
+                        let char_pos = Vec2::new(char_tf.translation.x, char_tf.translation.z);
+                        if (bullet_pos - char_pos).length_squared() <= suppression_dist_sq {
+                            suppression.add(SUPPRESSION_COVER_HIT_AMOUNT);
+                            sup_tracker.suppressed_entities.push(char_entity);
+                        }
+                    }
+                }
                 commands.entity(b_entity).despawn();
                 continue;
             }
         }
 
+        // 2.5. Apply near-miss proximity suppression as bullet flies near opposing soldiers
+        for (char_entity, char_tf, char_team, _, mut suppression) in &mut characters_q {
+            if bullet.team != *char_team
+                && !sup_tracker.suppressed_entities.contains(&char_entity)
+            {
+                let char_pos = Vec2::new(char_tf.translation.x, char_tf.translation.z);
+                if (bullet_pos - char_pos).length_squared() <= suppression_dist_sq {
+                    suppression.add(SUPPRESSION_NEAR_MISS_AMOUNT);
+                    sup_tracker.suppressed_entities.push(char_entity);
+                }
+            }
+        }
+
         // 3. Check hit on opposing team characters (Player / Enemy)
         let mut bullet_consumed = false;
-        for (char_entity, char_tf, char_team, soldier) in &characters_q {
+        for (char_entity, char_tf, char_team, soldier, mut suppression) in &mut characters_q {
             if bullet.team != *char_team {
                 // If this bullet has already rolled a miss against this character, ignore them so it keeps moving past
                 if bullet.missed_entities.contains(&char_entity) {
@@ -137,7 +183,8 @@ pub fn update_bullets(
                         }
 
                         if protected_by_wall {
-                            // Shot hits the wall instead of the ducked/prone soldier!
+                            // Shot hits the wall instead of the ducked/prone soldier, adding cover-impact suppression
+                            suppression.add(SUPPRESSION_COVER_HIT_AMOUNT);
                             bullet_consumed = true;
                             break;
                         }

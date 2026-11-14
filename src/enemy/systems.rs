@@ -6,7 +6,7 @@ use crate::common::geometry::{
 };
 use crate::common::types::{
     CurrentLevel, GunshotEvent, LevelEntity, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance,
-    Team,
+    Suppression, Team,
 };
 use crate::enemy::ai::{ENEMY_WAYPOINTS, Enemy, EnemyAiState, Zombie};
 use crate::fog::mesh::create_vision_cone_mesh;
@@ -432,7 +432,7 @@ pub fn update_enemy(
     mut commands: Commands,
     time: Res<Time>,
     mut enemy_q: Query<
-        (&mut Transform, &mut Enemy, &mut Soldier),
+        (&mut Transform, &mut Enemy, &mut Soldier, &mut Suppression),
         (
             With<Enemy>,
             Without<Zombie>,
@@ -500,8 +500,9 @@ pub fn update_enemy(
     // Collect all gunshot messages heard this frame so each enemy can process them
     let heard_gunshots: Vec<GunshotEvent> = gunshot_reader.read().copied().collect();
 
-    for (mut tf, mut enemy, mut soldier) in &mut enemy_q {
+    for (mut tf, mut enemy, mut soldier, mut suppression) in &mut enemy_q {
         soldier.inventory.tick(time.delta());
+        suppression.decay(dt);
         let enemy_pos = Vec2::new(tf.translation.x, tf.translation.z);
 
         // 0. React to nearby gunfire or active near-miss bullets if not already engaged in combat
@@ -747,9 +748,18 @@ pub fn update_enemy(
                     }
                 }
 
-                // Fire at target if not swapping
+                // Fire at target if not swapping and not pinned behind cover by suppression
                 enemy.shoot_timer.tick(time.delta());
-                if enemy.shoot_timer.is_finished() && !soldier.inventory.is_swapping() {
+                let current_pos = Vec2::new(tf.translation.x, tf.translation.z);
+                let behind_low_wall = is_near_low_wall(current_pos, &low_walls, 2.5)
+                    || has_low_wall_in_line_of_fire(current_pos, target, &low_walls);
+                let pinned_behind_cover =
+                    !is_moving && behind_low_wall && suppression.is_suppressed();
+
+                if !pinned_behind_cover
+                    && enemy.shoot_timer.is_finished()
+                    && !soldier.inventory.is_swapping()
+                {
                     let mut should_fire = false;
                     let mut bullet_speed = 38.0;
                     let mut bullet_lifetime = 1.6;
@@ -767,10 +777,6 @@ pub fn update_enemy(
 
                     if should_fire {
                         enemy.shoot_timer.reset();
-
-                        let current_pos = Vec2::new(tf.translation.x, tf.translation.z);
-                        let behind_low_wall = is_near_low_wall(current_pos, &low_walls, 2.5)
-                            || has_low_wall_in_line_of_fire(current_pos, target, &low_walls);
 
                         // If behind a low wall, pop up to standing to shoot over the wall
                         if behind_low_wall {
@@ -2304,5 +2310,164 @@ mod tests {
                 "Bullets fired from behind a low wall must pop up to Standing to clear the wall"
             );
         }
+    }
+
+    #[test]
+    fn test_suppressed_soldier_behind_cover_will_not_stand_up_or_fire() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+        app.insert_resource(CurrentLevel::Level3);
+
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh.clone(),
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat.clone(),
+        });
+        app.insert_resource(crate::combat::bullet::CorpseAssets {
+            blood_pool_mesh: bullet_mesh.clone(),
+            blood_splatter_mesh: bullet_mesh,
+            blood_material: dummy_mat.clone(),
+            player_corpse_material: dummy_mat.clone(),
+            enemy_corpse_material: dummy_mat,
+        });
+
+        // North courtyard wall at z = -8.0
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.375, -8.0),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(8.0, 0.5),
+            },
+        ));
+
+        // Enemy already in cover behind the north wall at (0.0, -9.35)
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, -9.35),
+                Enemy {
+                    state: EnemyAiState::Engage,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: Some(Vec2::new(0.0, 9.5)),
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.05, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: Vec2::new(0.0, -9.35),
+                },
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Crouching,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        // Player at (0.0, 9.5)
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 9.5),
+            Player,
+            Team::Player,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        // Spawn 4 incoming player bullets right near the enemy behind the wall to trigger suppression
+        for i in 0..4 {
+            app.world_mut().spawn((
+                Transform::from_xyz(0.5 + (i as f32) * 0.2, 0.08, -9.0),
+                Bullet {
+                    origin: Vec2::new(0.0, 9.5),
+                    direction: Vec2::new(0.0, -1.0),
+                    speed: 45.0,
+                    lifetime: 1.0,
+                    team: Team::Player,
+                    shooter_stance: Stance::Standing,
+                    missed_entities: Vec::new(),
+                },
+            ));
+        }
+
+        app.add_systems(
+            Update,
+            (
+                crate::combat::bullet::update_bullets,
+                update_enemy.after(crate::combat::bullet::update_bullets),
+            ),
+        );
+
+        // Advance 1 frame (60ms): bullets suppress the enemy, shoot_timer finishes (60ms > 50ms),
+        // but because the enemy is suppressed behind cover, it must NOT stand up or fire!
+        {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(60));
+        }
+        app.update();
+
+        let sup = app.world().get::<Suppression>(enemy_entity).unwrap();
+        let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
+        assert!(sup.is_suppressed(), "Enemy should be suppressed by the incoming volley");
+        assert_eq!(
+            soldier.stance,
+            Stance::Crouching,
+            "Suppressed soldier behind cover must stay crouched and not stand up"
+        );
+
+        let enemy_bullets = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .filter(|b| b.team == Team::Enemy)
+            .count();
+        assert_eq!(
+            enemy_bullets, 0,
+            "Suppressed soldier behind cover must hold fire"
+        );
+
+        // Despawn remaining player bullets and advance 3.5 seconds so suppression decays below exit threshold
+        let player_bullet_entities: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<Bullet>>()
+            .iter(app.world())
+            .collect();
+        for e in player_bullet_entities {
+            app.world_mut().despawn(e);
+        }
+
+        {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(3500));
+        }
+        app.update();
+
+        let sup = app.world().get::<Suppression>(enemy_entity).unwrap();
+        assert!(!sup.is_suppressed(), "Suppression should decay after incoming fire stops");
+
+        let enemy_bullets_after = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .filter(|b| b.team == Team::Enemy)
+            .count();
+        assert!(
+            enemy_bullets_after > 0,
+            "Once unsuppressed, soldier should resume popping up and firing over cover"
+        );
     }
 }
