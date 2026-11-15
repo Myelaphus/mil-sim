@@ -50,13 +50,25 @@ pub enum OrderType {
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SelectedOrderTool(pub Option<OrderType>);
 
-/// Active general order assigned to friendly units in `test_level_4`.
+///Active general order assigned to friendly infantry squads in `test_level_4`.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
 pub enum CommanderOrder {
     #[default]
     Hold,
     TakePosition(Vec2),
 }
+
+/// Selectable friendly unit groups that can receive independent orders in `test_level_4`.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CommandGroup {
+    #[default]
+    InfantrySquad,
+    Apc,
+}
+
+/// Active general order assigned specifically to the friendly APC group in `test_level_4`.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
+pub struct ApcOrder(pub CommanderOrder);
 
 /// Resource controlling whether the Fog of War overlay and enemy concealment are active.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]

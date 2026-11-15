@@ -513,6 +513,7 @@ pub fn update_enemy(
             With<crate::friendly::Friendly>,
             Without<Enemy>,
             Without<Player>,
+            Without<crate::vehicle::MountedInVehicle>,
         ),
     >,
     buildings_q: Query<

@@ -5,6 +5,7 @@ mod fog;
 mod friendly;
 mod player;
 mod ui;
+mod vehicle;
 mod world;
 
 use bevy::prelude::*;
@@ -16,6 +17,7 @@ use fog::FogPlugin;
 use friendly::FriendlyPlugin;
 use player::PlayerPlugin;
 use ui::UiPlugin;
+use vehicle::VehiclePlugin;
 use world::WorldPlugin;
 
 fn main() {
@@ -33,6 +35,8 @@ fn main() {
         .init_resource::<common::types::SquadCommand>()
         .init_resource::<common::types::SelectedOrderTool>()
         .init_resource::<common::types::CommanderOrder>()
+        .init_resource::<common::types::CommandGroup>()
+        .init_resource::<common::types::ApcOrder>()
         .init_resource::<common::types::FogOfWarEnabled>()
         .init_resource::<friendly::SquadDoctrineState>()
         .add_plugins((
@@ -42,6 +46,7 @@ fn main() {
             PlayerPlugin,
             FriendlyPlugin,
             EnemyPlugin,
+            VehiclePlugin,
             UiPlugin,
         ))
         .add_systems(
@@ -51,6 +56,7 @@ fn main() {
                 .after(friendly::update_friendly)
                 .after(enemy::update_enemy)
                 .after(enemy::update_zombies)
+                .after(vehicle::update_dismounted_crew_return)
                 .run_if(in_state(AppState::InGame)),
         )
         .run();
@@ -103,6 +109,10 @@ mod tests {
                 friendly::update_friendly,
                 enemy::update_enemy,
                 enemy::update_zombies,
+                vehicle::handle_vehicle_crew_mount_commands,
+                vehicle::update_crewed_apc_vehicles,
+                vehicle::update_dismounted_crew_return,
+                vehicle::resolve_soldier_apc_collisions,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
                 resolve_soldier_pairwise_collisions,

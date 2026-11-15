@@ -152,7 +152,13 @@ pub fn directional_speed_multiplier(facing_dir: Vec2, move_dir: Vec2) -> f32 {
 // Pairwise collision resolution system ensuring soldiers cannot occupy the same point in space
 pub fn resolve_soldier_pairwise_collisions(
     current_level: Option<Res<CurrentLevel>>,
-    mut soldiers_q: Query<(Entity, &mut Transform), With<crate::common::types::Soldier>>,
+    mut soldiers_q: Query<
+        (Entity, &mut Transform),
+        (
+            With<crate::common::types::Soldier>,
+            Without<crate::vehicle::MountedInVehicle>,
+        ),
+    >,
     buildings_q: Query<(&Transform, &BuildingCollider), (With<crate::world::buildings::Building>, Without<crate::common::types::Soldier>)>,
     low_walls_q: Query<(&Transform, &LowWallCollider), (With<crate::world::buildings::LowWall>, Without<crate::common::types::Soldier>)>,
 ) {

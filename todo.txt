@@ -1,9 +1,12 @@
-infrantry ai fixes
 apc model
 apc combat and AI
+infantry loading and unloading into apc
 tank model
 tank combat and AI
-infantry loading and unloading into apc
+ammo types and penetration
+armor system
+light vs medium vs heavy cover
+vehicle components and damage system
 attack helicopter model
 attack helicopter combat and AI
 fighter plane model
@@ -29,7 +32,9 @@ terrain features:
     elevation
 terrain type affects movement speed
 soldier stamina
+randomly generate soldier names and ranks
 infantry occupy buildings
 injuries
 first aid
 medivac
+infrantry ai fixes

@@ -54,7 +54,7 @@ pub fn update_bullets(
     low_walls_q: Query<(&Transform, &LowWallCollider), (With<LowWall>, Without<Bullet>)>,
     mut characters_q: Query<
         (Entity, &Transform, &Team, &Soldier, &mut Suppression),
-        Without<Bullet>,
+        (Without<Bullet>, Without<crate::vehicle::MountedInVehicle>),
     >,
 ) {
     let dt = time.delta_secs();

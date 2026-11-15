@@ -406,7 +406,13 @@ pub fn update_friendly(
             &mut Suppression,
             Option<&SquadId>,
         ),
-        (With<Friendly>, Without<Player>, Without<Enemy>),
+        (
+            With<Friendly>,
+            Without<Player>,
+            Without<Enemy>,
+            Without<crate::vehicle::MountedInVehicle>,
+            Without<crate::vehicle::VehicleCrewMember>,
+        ),
     >,
     player_q: Query<
         (Entity, &Transform, &Soldier),
@@ -1534,7 +1540,13 @@ pub fn update_friendly(
                             ) => {
                                 // Decision 2: Break Contact (Reverse Bounding Overwatch)
                                 // Active bounding fire team bounds rearward toward `rally_point`;
-                                // Overwatch fire team halts, crouches, and lays maximum suppressive fire.
+                                // Overwatch fire team halts, crouches, and lays suppressive fire ONLY
+                                // while an actual enemy contact is present (`has_active_enemy_contact`).
+                                let has_active_enemy_contact = !visible_enemies.is_empty()
+                                    || under_fire_source.is_some()
+                                    || shared_squad_contact.is_some();
+                                let watch_dir = (Vec2::ZERO - rally_point)
+                                    .normalize_or(Vec2::new(0.0, -1.0));
                                 let member_bound_ft = if friendly.fireteam == 0 {
                                     1
                                 } else {
@@ -1574,16 +1586,27 @@ pub fn update_friendly(
                                         tf.translation.z = resolved.y;
                                     } else {
                                         soldier.stance = Stance::Crouching;
-                                        has_clear_flank_shot = true;
+                                        if has_active_enemy_contact {
+                                            has_clear_flank_shot = true;
+                                        } else {
+                                            hold_fire = true;
+                                            soldier.facing_dir = watch_dir;
+                                        }
                                     }
                                 } else {
-                                    // Overwatch fire team: hold position and pour maximum suppressive fire
-                                    is_ft1_suppressing = true;
+                                    // Overwatch fire team: hold position and suppress active enemy contact;
+                                    // once line-of-sight is broken, hold fire and watch the threat axis.
                                     soldier.stance = Stance::Crouching;
-                                    has_clear_flank_shot = true;
-                                    friendly
-                                        .shoot_timer
-                                        .set_duration(std::time::Duration::from_secs_f32(0.14));
+                                    if has_active_enemy_contact {
+                                        is_ft1_suppressing = true;
+                                        has_clear_flank_shot = true;
+                                        friendly
+                                            .shoot_timer
+                                            .set_duration(std::time::Duration::from_secs_f32(0.14));
+                                    } else {
+                                        hold_fire = true;
+                                        soldier.facing_dir = watch_dir;
+                                    }
                                 }
                             }
                             SquadTacticalPhase::DecisionActive(
@@ -2038,12 +2061,19 @@ pub fn update_friendly(
                         }
                     }
 
-                    // Fire weapon at target enemy if not swapping, not holding fire, and not pinned behind cover by suppression
+                    // Fire weapon at target enemy if not swapping, not holding fire, not blocked by a solid building,
+                    // within effective rifle range, and not pinned behind cover by suppression
                     friendly.shoot_timer.tick(time.delta());
                     let pinned_behind_cover =
                         !is_moving && near_low_wall && suppression.is_suppressed();
-                    let can_engage_target =
-                        !visible_enemies.is_empty() || is_ft1_suppressing || has_clear_flank_shot;
+                    let line_of_fire_unblocked_by_building =
+                        has_clear_shot_past_cover(current_pos, target, &buildings, &[]);
+                    let within_effective_weapon_range = dist <= 45.0;
+                    let can_engage_target = within_effective_weapon_range
+                        && line_of_fire_unblocked_by_building
+                        && (!visible_enemies.is_empty()
+                            || is_ft1_suppressing
+                            || has_clear_flank_shot);
                     if !hold_fire
                         && can_engage_target
                         && !(is_ft2_flanking && is_moving)
@@ -4368,6 +4398,93 @@ mod tests {
         assert_eq!(
             normal_returns_after_contact, 0,
             "Depleted squad should withdraw to rally and hold (FixAndSupport) rather than oscillating back to Normal while enemies remain alive"
+        );
+    }
+
+    #[test]
+    fn test_break_contact_at_rally_point_does_not_fire_into_nothing() {
+        let mut app = create_test_app();
+        app.insert_resource(CurrentLevel::Level4);
+        app.insert_resource(SquadCommand::Formation);
+        app.insert_resource(CommanderOrder::TakePosition(Vec2::new(0.0, 10.0)));
+
+        let rally_point = Vec2::new(45.0, 55.0);
+        let mut doctrine = SquadDoctrineState::default();
+        doctrine.entry_mut(0).phase =
+            SquadTacticalPhase::DecisionActive(SquadLeaderDecision::BreakContact {
+                rally_point,
+                active_bound_ft: 2,
+                bound_timer: 3.0,
+            });
+        app.insert_resource(doctrine);
+
+        // Spawn a single surviving Senior Rifleman (fireteam 2, slot 1) already at the rally point
+        app.world_mut().spawn((
+            Transform::from_xyz(rally_point.x - 2.8, 0.05, rally_point.y + 1.2),
+            Friendly {
+                fireteam: 2,
+                slot: 1,
+                state: FriendlyAiState::Follow,
+                shoot_timer: Timer::from_seconds(0.15, TimerMode::Repeating),
+                speed: 12.0,
+                vision_range: 24.0,
+                vision_half_angle: 45.0_f32.to_radians(),
+                inner_radius: 2.0,
+                target_pos: None,
+                target_lost_timer: 0.0,
+            },
+            Team::Player,
+            SquadId(0),
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Crouching,
+                inventory: crate::common::types::Inventory::default(),
+            },
+            Suppression::default(),
+        ));
+
+        // Enemy is far away in the village (out of sight at (0.0, 15.0))
+        app.world_mut().spawn((
+            Transform::from_xyz(0.0, 0.05, 15.0),
+            Enemy {
+                state: crate::enemy::ai::EnemyAiState::Search,
+                current_waypoint_idx: 0,
+                last_known_player_pos: None,
+                investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                speed: 5.5,
+                vision_range: 24.0,
+                vision_half_angle: 45.0_f32.to_radians(),
+                inner_radius: 2.0,
+                stuck_timer: 0.0,
+                last_pos: Vec2::new(0.0, 15.0),
+            },
+            Team::Enemy,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        app.add_systems(Update, update_friendly);
+
+        for _ in 0..20 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let bullets_fired = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            bullets_fired, 0,
+            "Surviving soldier at BreakContact rally point with no visible enemy contact must hold fire instead of shooting into nothing"
         );
     }
 }
