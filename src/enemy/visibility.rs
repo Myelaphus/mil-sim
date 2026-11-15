@@ -1,14 +1,15 @@
 use bevy::prelude::*;
 use crate::common::geometry::can_see_target;
-use crate::common::types::{CurrentLevel, Soldier};
+use crate::common::types::{FogOfWarEnabled, Soldier};
 use crate::enemy::ai::Enemy;
 use crate::friendly::Friendly;
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider};
 
 // Dynamically sets enemy visibility based on fire team vision cones (player & living friendlies)
+// and the FogOfWarEnabled debug toggle.
 pub fn update_enemy_visibility(
-    current_level: Option<Res<CurrentLevel>>,
+    fog_enabled: Option<Res<FogOfWarEnabled>>,
     player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Enemy>, Without<Friendly>)>,
     friendly_q: Query<(&Transform, &Soldier), (With<Friendly>, Without<Enemy>, Without<Player>)>,
     mut enemy_q: Query<
@@ -25,13 +26,8 @@ pub fn update_enemy_visibility(
         ),
     >,
 ) {
-    // In RTS level (Level 4), fog of war is disabled so all units are visible on the map
-    if current_level
-        .as_deref()
-        .copied()
-        .unwrap_or(CurrentLevel::Level1)
-        == CurrentLevel::Level4
-    {
+    // When Fog of War is toggled OFF for debugging, reveal all enemy units on the map
+    if !fog_enabled.as_deref().map_or(true, |f| f.0) {
         for (_, mut vis) in &mut enemy_q {
             *vis = Visibility::Inherited;
         }

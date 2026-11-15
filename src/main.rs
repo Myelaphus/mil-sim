@@ -33,6 +33,7 @@ fn main() {
         .init_resource::<common::types::SquadCommand>()
         .init_resource::<common::types::SelectedOrderTool>()
         .init_resource::<common::types::CommanderOrder>()
+        .init_resource::<common::types::FogOfWarEnabled>()
         .add_plugins((
             WorldPlugin,
             FogPlugin,

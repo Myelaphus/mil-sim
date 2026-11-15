@@ -1,5 +1,6 @@
 use crate::common::types::{
-    AppState, CommanderOrder, CurrentLevel, LevelEntity, SelectedOrderTool, SquadCommand,
+    AppState, CommanderOrder, CurrentLevel, FogOfWarEnabled, LevelEntity, SelectedOrderTool,
+    SquadCommand,
 };
 use crate::enemy::ai::Enemy;
 use crate::player::Player;
@@ -563,6 +564,7 @@ pub fn cleanup_level(
     mut squad_command: Option<ResMut<SquadCommand>>,
     mut commander_order: Option<ResMut<CommanderOrder>>,
     mut selected_tool: Option<ResMut<SelectedOrderTool>>,
+    mut fog_enabled: Option<ResMut<FogOfWarEnabled>>,
     level_entities_q: Query<Entity, With<LevelEntity>>,
 ) {
     level_end.timer = None;
@@ -575,6 +577,9 @@ pub fn cleanup_level(
     }
     if let Some(ref mut tool) = selected_tool {
         tool.0 = None;
+    }
+    if let Some(ref mut fog) = fog_enabled {
+        fog.0 = true;
     }
 
     for entity in &level_entities_q {

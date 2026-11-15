@@ -131,7 +131,7 @@ pub fn setup_village_squad(
         meshes,
         materials,
         &squad_configs,
-        Visibility::Inherited,
+        Visibility::Hidden,
     );
 }
 
@@ -2582,7 +2582,7 @@ mod tests {
             "test_level_4 should spawn the 9-man enemy squad in the village"
         );
         for (pos, vis) in &initial_positions {
-            assert_eq!(*vis, Visibility::Inherited);
+            assert_eq!(*vis, Visibility::Hidden);
             assert!(
                 pos.x.abs() <= 40.0 && pos.y >= -55.0 && pos.y <= 50.0,
                 "Village enemy should be positioned inside the central village, got {:?}",

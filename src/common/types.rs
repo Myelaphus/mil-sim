@@ -58,6 +58,16 @@ pub enum CommanderOrder {
     TakePosition(Vec2),
 }
 
+/// Resource controlling whether the Fog of War overlay and enemy concealment are active.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FogOfWarEnabled(pub bool);
+
+impl Default for FogOfWarEnabled {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 #[derive(Component)]
 pub struct LevelEntity;
 

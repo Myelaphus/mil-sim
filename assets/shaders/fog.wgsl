@@ -8,10 +8,11 @@ struct FogMaterial {
     inner_radius: f32,
     fog_alpha: f32,
     building_count: u32,
-    _pad0: f32,
+    spotter_count: u32,
     _pad1: f32,
     _pad2: f32,
     buildings: array<vec4<f32>, 16>,
+    spotters: array<vec4<f32>, 16>,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: FogMaterial;
@@ -74,14 +75,9 @@ fn ray_intersects_box(origin: vec2<f32>, p_target: vec2<f32>, b: vec4<f32>) -> b
     return tmin < 0.999 && tmax > 0.001;
 }
 
-@fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let world_xz = vec2<f32>(in.world_position.x, in.world_position.z);
-    let to_frag = world_xz - material.soldier_pos;
+fn compute_spotter_visibility(world_xz: vec2<f32>, s_pos: vec2<f32>, s_dir: vec2<f32>) -> f32 {
+    let to_frag = world_xz - s_pos;
     let dist = length(to_frag);
-
-    // Fog color: dark slate tactical grey
-    let fog_base_color = vec3<f32>(0.13, 0.14, 0.17);
 
     // 1. Close-range 360° awareness circle around the soldier
     let inner_visibility = 1.0 - smoothstep(material.inner_radius - 0.6, material.inner_radius, dist);
@@ -92,7 +88,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // 3. Directional vision cone calculation
     let safe_dist = max(dist, 0.001);
     let dir = to_frag / safe_dist;
-    let dot_prod = dot(dir, normalize(material.soldier_dir));
+    let dot_prod = dot(dir, normalize(s_dir));
     let cos_half_angle = cos(material.vision_angle);
 
     // Anti-aliased smooth edge along the vision cone flanks
@@ -102,16 +98,36 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let cone_visibility = (1.0 - range_fade) * angle_visibility;
 
     // Base visibility without obstacles
-    var visibility = clamp(max(cone_visibility, inner_visibility), 0.0, 1.0);
+    var vis = clamp(max(cone_visibility, inner_visibility), 0.0, 1.0);
 
     // 4. Line-of-sight obstruction check against buildings
-    // If a building is between the soldier and this point, cast fog shadow
-    if (visibility > 0.0) {
+    if (vis > 0.0) {
         for (var i = 0u; i < material.building_count; i = i + 1u) {
-            if (ray_intersects_box(material.soldier_pos, world_xz, material.buildings[i])) {
-                visibility = 0.0;
+            if (ray_intersects_box(s_pos, world_xz, material.buildings[i])) {
+                vis = 0.0;
                 break;
             }
+        }
+    }
+
+    return vis;
+}
+
+@fragment
+fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    let world_xz = vec2<f32>(in.world_position.x, in.world_position.z);
+
+    // Fog color: dark slate tactical grey
+    let fog_base_color = vec3<f32>(0.13, 0.14, 0.17);
+
+    var visibility = 0.0;
+    if (material.spotter_count == 0u) {
+        visibility = compute_spotter_visibility(world_xz, material.soldier_pos, material.soldier_dir);
+    } else {
+        for (var s = 0u; s < material.spotter_count; s = s + 1u) {
+            let spotter = material.spotters[s];
+            let s_vis = compute_spotter_visibility(world_xz, spotter.xy, spotter.zw);
+            visibility = max(visibility, s_vis);
         }
     }
 

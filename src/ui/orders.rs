@@ -1,5 +1,5 @@
 use crate::common::types::{
-    CommanderOrder, CurrentLevel, LevelEntity, OrderType, RTS_SOLDIER_WORLD_BOUND,
+    CommanderOrder, CurrentLevel, FogOfWarEnabled, LevelEntity, OrderType, RTS_SOLDIER_WORLD_BOUND,
     SelectedOrderTool,
 };
 use bevy::prelude::*;
@@ -13,6 +13,12 @@ pub struct TakePositionOrderButton;
 
 #[derive(Component)]
 pub struct ClearOrderButton;
+
+#[derive(Component)]
+pub struct FogToggleButton;
+
+#[derive(Component)]
+pub struct FogToggleButtonText;
 
 #[derive(Component)]
 pub struct OrderStatusText;
@@ -171,6 +177,32 @@ pub fn setup_orders_ui(
                         TextColor(Color::srgb(0.92, 0.85, 0.85)),
                     ));
                 });
+
+                row.spawn((
+                    Button,
+                    FogToggleButton,
+                    Node {
+                        padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        border: UiRect::all(Val::Px(1.5)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(ORDER_BTN_SELECTED),
+                    BorderColor::all(Color::srgb(0.24, 0.56, 0.48)),
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        FogToggleButtonText,
+                        Text::new("[F] FOG OF WAR: ON"),
+                        TextFont {
+                            font_size: FontSize::Px(13.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.98, 1.0)),
+                    ));
+                });
             });
 
             root.spawn((
@@ -185,7 +217,7 @@ pub fn setup_orders_ui(
         });
 }
 
-/// Handles order type selection (via UI buttons or hotkeys) and map click target assignment.
+/// Handles order type selection (via UI buttons or hotkeys), debug fog toggle, and map click target assignment.
 pub fn update_orders_ui(
     current_level: Option<Res<CurrentLevel>>,
     keyboard_input: Option<Res<ButtonInput<KeyCode>>>,
@@ -194,15 +226,36 @@ pub fn update_orders_ui(
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     selected_tool: Option<ResMut<SelectedOrderTool>>,
     commander_order: Option<ResMut<CommanderOrder>>,
+    mut fog_enabled: Option<ResMut<FogOfWarEnabled>>,
     mut take_pos_btn_q: Query<
         (&Interaction, &mut BackgroundColor),
-        (With<TakePositionOrderButton>, Without<ClearOrderButton>),
+        (
+            With<TakePositionOrderButton>,
+            Without<ClearOrderButton>,
+            Without<FogToggleButton>,
+        ),
     >,
     mut clear_btn_q: Query<
         (&Interaction, &mut BackgroundColor),
-        (With<ClearOrderButton>, Without<TakePositionOrderButton>),
+        (
+            With<ClearOrderButton>,
+            Without<TakePositionOrderButton>,
+            Without<FogToggleButton>,
+        ),
     >,
-    mut status_text_q: Query<(&mut Text, &mut TextColor), With<OrderStatusText>>,
+    mut fog_btn_q: Query<
+        (&Interaction, &mut BackgroundColor),
+        (
+            With<FogToggleButton>,
+            Without<TakePositionOrderButton>,
+            Without<ClearOrderButton>,
+        ),
+    >,
+    mut fog_text_q: Query<&mut Text, (With<FogToggleButtonText>, Without<OrderStatusText>)>,
+    mut status_text_q: Query<
+        (&mut Text, &mut TextColor),
+        (With<OrderStatusText>, Without<FogToggleButtonText>),
+    >,
     mut marker_q: Query<
         (&mut Transform, &mut Visibility),
         (With<OrderObjectiveMarker>, Without<Camera3d>),
@@ -219,16 +272,22 @@ pub fn update_orders_ui(
 
     let mut ui_captured_click = false;
 
-    // 1. UI button interactions for selecting/clearing order types
+    let button_just_clicked = mouse_buttons
+        .as_ref()
+        .map_or(true, |mb| mb.just_pressed(MouseButton::Left));
+
+    // 1. UI button interactions for selecting/clearing order types and toggling Fog of War
     for (interaction, mut bg) in &mut take_pos_btn_q {
         match *interaction {
             Interaction::Pressed => {
                 ui_captured_click = true;
-                selected_tool.0 = if selected_tool.0 == Some(OrderType::TakePosition) {
-                    None
-                } else {
-                    Some(OrderType::TakePosition)
-                };
+                if button_just_clicked {
+                    selected_tool.0 = if selected_tool.0 == Some(OrderType::TakePosition) {
+                        None
+                    } else {
+                        Some(OrderType::TakePosition)
+                    };
+                }
             }
             Interaction::Hovered => {
                 ui_captured_click = true;
@@ -266,7 +325,23 @@ pub fn update_orders_ui(
         }
     }
 
-    // 2. Keyboard shortcuts for selecting order types or cancelling
+    let mut toggle_fog = false;
+    for (interaction, _) in &mut fog_btn_q {
+        match *interaction {
+            Interaction::Pressed => {
+                ui_captured_click = true;
+                if button_just_clicked {
+                    toggle_fog = true;
+                }
+            }
+            Interaction::Hovered => {
+                ui_captured_click = true;
+            }
+            Interaction::None => {}
+        }
+    }
+
+    // 2. Keyboard shortcuts for selecting order types, toggling fog, or cancelling
     if let Some(ref keys) = keyboard_input {
         if keys.just_pressed(KeyCode::Digit1) {
             selected_tool.0 = if selected_tool.0 == Some(OrderType::TakePosition) {
@@ -275,6 +350,9 @@ pub fn update_orders_ui(
                 Some(OrderType::TakePosition)
             };
         }
+        if keys.just_pressed(KeyCode::KeyF) {
+            toggle_fog = true;
+        }
         if keys.just_pressed(KeyCode::Escape) {
             selected_tool.0 = None;
         }
@@ -282,6 +360,30 @@ pub fn update_orders_ui(
             selected_tool.0 = None;
             *commander_order = CommanderOrder::Hold;
         }
+    }
+
+    if toggle_fog {
+        if let Some(ref mut fog) = fog_enabled {
+            fog.0 = !fog.0;
+        }
+    }
+
+    let is_fog_on = fog_enabled.as_deref().map_or(true, |f| f.0);
+    for (interaction, mut bg) in &mut fog_btn_q {
+        *bg = BackgroundColor(if is_fog_on {
+            ORDER_BTN_SELECTED
+        } else if *interaction == Interaction::Hovered {
+            ORDER_BTN_HOVER
+        } else {
+            ORDER_BTN_NORMAL
+        });
+    }
+    for mut text in &mut fog_text_q {
+        **text = if is_fog_on {
+            "[F] FOG OF WAR: ON".to_string()
+        } else {
+            "[F] FOG OF WAR: OFF".to_string()
+        };
     }
 
     // Sync TakePosition button background after keyboard toggle
@@ -301,8 +403,7 @@ pub fn update_orders_ui(
             .as_ref()
             .is_some_and(|mb| mb.just_pressed(MouseButton::Left));
         if left_clicked && !ui_captured_click {
-            if let (Ok(window), Ok((camera, cam_global_tf))) =
-                (windows.single(), camera_q.single())
+            if let (Ok(window), Ok((camera, cam_global_tf))) = (windows.single(), camera_q.single())
             {
                 if let Some(cursor_pos) = window.cursor_position() {
                     if let Ok(ray) = camera.viewport_to_world(cam_global_tf, cursor_pos) {
@@ -381,6 +482,7 @@ mod tests {
         app.insert_resource(CurrentLevel::Level4);
         app.init_resource::<SelectedOrderTool>();
         app.init_resource::<CommanderOrder>();
+        app.init_resource::<FogOfWarEnabled>();
         app.init_resource::<ButtonInput<KeyCode>>();
         app.init_resource::<ButtonInput<MouseButton>>();
 
@@ -388,9 +490,45 @@ mod tests {
         app.add_systems(Update, update_orders_ui);
         app.update();
 
-        // Initially no tool is armed and order is Hold
+        // Initially no tool is armed, order is Hold, and Fog of War is enabled
         assert_eq!(app.world().resource::<SelectedOrderTool>().0, None);
-        assert_eq!(*app.world().resource::<CommanderOrder>(), CommanderOrder::Hold);
+        assert_eq!(
+            *app.world().resource::<CommanderOrder>(),
+            CommanderOrder::Hold
+        );
+        assert!(app.world().resource::<FogOfWarEnabled>().0);
+
+        // Press [F] to toggle Fog of War OFF for debugging
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyF);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        assert!(
+            !app.world().resource::<FogOfWarEnabled>().0,
+            "Pressing F should toggle FogOfWarEnabled to false"
+        );
+
+        // Press [F] again to toggle Fog of War back ON
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyF);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        assert!(
+            app.world().resource::<FogOfWarEnabled>().0,
+            "Pressing F again should toggle FogOfWarEnabled back to true"
+        );
 
         // Press [1] key to select TakePosition order type
         app.world_mut()
@@ -426,4 +564,3 @@ mod tests {
         );
     }
 }
-
