@@ -1,4 +1,6 @@
-use crate::common::types::{AppState, CurrentLevel, LevelEntity, SquadCommand};
+use crate::common::types::{
+    AppState, CommanderOrder, CurrentLevel, LevelEntity, SelectedOrderTool, SquadCommand,
+};
 use crate::enemy::ai::Enemy;
 use crate::player::Player;
 use bevy::prelude::*;
@@ -559,12 +561,20 @@ pub fn cleanup_level(
     mut commands: Commands,
     mut level_end: ResMut<LevelEndManager>,
     mut squad_command: Option<ResMut<SquadCommand>>,
+    mut commander_order: Option<ResMut<CommanderOrder>>,
+    mut selected_tool: Option<ResMut<SelectedOrderTool>>,
     level_entities_q: Query<Entity, With<LevelEntity>>,
 ) {
     level_end.timer = None;
     level_end.outcome = None;
     if let Some(ref mut cmd) = squad_command {
         **cmd = SquadCommand::Formation;
+    }
+    if let Some(ref mut order) = commander_order {
+        **order = CommanderOrder::Hold;
+    }
+    if let Some(ref mut tool) = selected_tool {
+        tool.0 = None;
     }
 
     for entity in &level_entities_q {

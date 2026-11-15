@@ -31,6 +31,8 @@ fn main() {
         .init_state::<AppState>()
         .init_resource::<common::types::CurrentLevel>()
         .init_resource::<common::types::SquadCommand>()
+        .init_resource::<common::types::SelectedOrderTool>()
+        .init_resource::<common::types::CommanderOrder>()
         .add_plugins((
             WorldPlugin,
             FogPlugin,
@@ -105,6 +107,7 @@ mod tests {
                 world::update_camera,
                 ui::update_fps,
                 ui::update_ammo_ui,
+                ui::update_orders_ui,
                 ui::update_main_menu_interactions,
                 ui::check_level_end_conditions,
             ),

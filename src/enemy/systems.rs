@@ -2,11 +2,11 @@ use crate::combat::bullet::{Bullet, BulletAssets};
 use crate::common::geometry::{
     apply_shoot_spread, can_see_target, directional_speed_multiplier, find_avoidance_direction,
     find_cover_position, has_low_wall_in_line_of_fire, is_near_low_wall,
-    resolve_circle_obstacle_collision,
+    resolve_circle_obstacle_collision, resolve_circle_obstacle_collision_bounded,
 };
 use crate::common::types::{
-    CurrentLevel, GunshotEvent, LevelEntity, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance,
-    Suppression, Team,
+    CurrentLevel, GunshotEvent, LevelEntity, RTS_SOLDIER_WORLD_BOUND, SOLDIER_RADIUS,
+    SOLDIER_WORLD_BOUND, Soldier, Stance, Suppression, Team,
 };
 use crate::enemy::ai::{ENEMY_WAYPOINTS, Enemy, EnemyAiState, Zombie};
 use crate::fog::mesh::create_vision_cone_mesh;
@@ -53,7 +53,7 @@ pub fn setup_enemy(
             setup_courtyard_fireteam(&mut commands, &mut meshes, &mut materials);
         }
         CurrentLevel::Level4 => {
-            // RTS level starts with map and camera controls only (no enemy units yet)
+            setup_village_squad(&mut commands, &mut meshes, &mut materials);
         }
     }
 }
@@ -92,7 +92,47 @@ pub fn setup_courtyard_fireteam(
         (Vec2::new(1.0, -11.5), south, 0),
         (Vec2::new(3.0, -10.5), south, 0),
     ];
-    spawn_enemy_soldiers(commands, meshes, materials, &fireteam_configs);
+    spawn_enemy_soldiers_with_visibility(
+        commands,
+        meshes,
+        materials,
+        &fireteam_configs,
+        Visibility::Hidden,
+    );
+}
+
+/// Positions for the 9-man enemy squad standing in the central village in `test_level_4`.
+pub const VILLAGE_ENEMY_POSITIONS: [Vec2; 9] = [
+    Vec2::new(0.0, 15.0),
+    Vec2::new(-3.0, 22.0),
+    Vec2::new(3.0, 22.0),
+    Vec2::new(-5.5, 30.0),
+    Vec2::new(5.5, 30.0),
+    Vec2::new(-2.5, 38.0),
+    Vec2::new(2.5, 38.0),
+    Vec2::new(-5.0, 8.0),
+    Vec2::new(5.0, 8.0),
+];
+
+/// Spawn a 9-man enemy squad standing in the village for `test_level_4` (not patrolling).
+pub fn setup_village_squad(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    let south = Vec2::new(0.0, 1.0);
+    let squad_configs: Vec<(Vec2, Vec2, usize)> = VILLAGE_ENEMY_POSITIONS
+        .iter()
+        .enumerate()
+        .map(|(idx, &pos)| (pos, south, idx % ENEMY_WAYPOINTS.len()))
+        .collect();
+    spawn_enemy_soldiers_with_visibility(
+        commands,
+        meshes,
+        materials,
+        &squad_configs,
+        Visibility::Inherited,
+    );
 }
 
 fn spawn_enemy_soldiers(
@@ -100,6 +140,22 @@ fn spawn_enemy_soldiers(
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     enemy_configs: &[(Vec2, Vec2, usize)],
+) {
+    spawn_enemy_soldiers_with_visibility(
+        commands,
+        meshes,
+        materials,
+        enemy_configs,
+        Visibility::Hidden,
+    );
+}
+
+fn spawn_enemy_soldiers_with_visibility(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    enemy_configs: &[(Vec2, Vec2, usize)],
+    initial_visibility: Visibility,
 ) {
     let pointer_mesh = meshes.add(Circle::new(0.15));
     let enemy_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
@@ -133,7 +189,7 @@ fn spawn_enemy_soldiers(
                 MeshMaterial3d(enemy_soldier_material.clone()),
                 Transform::from_xyz(pos.x, 0.05, pos.y)
                     .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2)),
-                Visibility::Hidden,
+                initial_visibility,
                 Enemy {
                     state: EnemyAiState::Search,
                     current_waypoint_idx: start_wp_idx,
@@ -157,19 +213,19 @@ fn spawn_enemy_soldiers(
             ))
             .id();
 
-        // Attach direction indicator to enemy
+        // Attach direction indicator to enemy (local +Z is world +Y, above soldier body)
         commands.spawn((
             Mesh3d(pointer_mesh.clone()),
             MeshMaterial3d(enemy_pointer_material.clone()),
-            Transform::from_xyz(0.0, 0.42, 0.01),
+            Transform::from_xyz(0.0, 0.42, 0.015),
             ChildOf(enemy),
         ));
 
-        // Attach visible vision cone to enemy
+        // Attach visible vision cone to enemy (local -Z is world -Y, below soldier body and above road/ground)
         commands.spawn((
             Mesh3d(enemy_cone_mesh.clone()),
             MeshMaterial3d(enemy_cone_material.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.005),
+            Transform::from_xyz(0.0, 0.0, -0.015),
             ChildOf(enemy),
         ));
     }
@@ -491,6 +547,11 @@ pub fn update_enemy(
     current_level: Option<Res<CurrentLevel>>,
 ) {
     let level = current_level.as_deref().copied().unwrap_or_default();
+    let world_bound = if level == CurrentLevel::Level4 {
+        RTS_SOLDIER_WORLD_BOUND
+    } else {
+        SOLDIER_WORLD_BOUND
+    };
     let dt = time.delta_secs();
     let soldier_radius = SOLDIER_RADIUS;
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
@@ -640,11 +701,18 @@ pub fn update_enemy(
 
                 // Attempt to take cover behind a nearby obstruction between enemy and threat.
                 // Crouching directly behind a low wall avoids going prone and shooting into the wall.
+                // Solid buildings block line of sight completely, so only hide behind solid buildings when suppressed.
                 let mut is_moving = false;
+                let cover_buildings: &[(&Transform, &BuildingCollider)] =
+                    if suppression.is_suppressed() {
+                        &buildings
+                    } else {
+                        &[]
+                    };
                 if let Some(cover_spot) = find_cover_position(
                     enemy_pos,
                     target,
-                    &buildings,
+                    cover_buildings,
                     &low_walls,
                     soldier_radius,
                     16.0,
@@ -672,11 +740,12 @@ pub fn update_enemy(
                         };
                         let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
                         let next_pos = enemy_pos + move_dir * (enemy.speed * dir_mult) * dt;
-                        let resolved = resolve_circle_obstacle_collision(
+                        let resolved = resolve_circle_obstacle_collision_bounded(
                             next_pos,
                             soldier_radius,
                             &buildings,
                             &low_walls,
+                            world_bound,
                         );
                         tf.translation.x = resolved.x;
                         tf.translation.z = resolved.y;
@@ -703,11 +772,12 @@ pub fn update_enemy(
                         let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
                         let crawl_speed = enemy.speed * 0.32 * dir_mult;
                         let next_pos = enemy_pos + move_dir * crawl_speed * dt;
-                        let resolved = resolve_circle_obstacle_collision(
+                        let resolved = resolve_circle_obstacle_collision_bounded(
                             next_pos,
                             soldier_radius,
                             &buildings,
                             &low_walls,
+                            world_bound,
                         );
                         tf.translation.x = resolved.x;
                         tf.translation.z = resolved.y;
@@ -725,11 +795,12 @@ pub fn update_enemy(
                         );
                         let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
                         let next_pos = enemy_pos + move_dir * (enemy.speed * 0.75 * dir_mult) * dt;
-                        let resolved = resolve_circle_obstacle_collision(
+                        let resolved = resolve_circle_obstacle_collision_bounded(
                             next_pos,
                             soldier_radius,
                             &buildings,
                             &low_walls,
+                            world_bound,
                         );
                         tf.translation.x = resolved.x;
                         tf.translation.z = resolved.y;
@@ -849,11 +920,12 @@ pub fn update_enemy(
                                 directional_speed_multiplier(soldier.facing_dir, move_dir);
                             let speed = enemy.speed * 0.85 * dir_mult;
                             let next_pos = enemy_pos + move_dir * speed * dt;
-                            let resolved = resolve_circle_obstacle_collision(
+                            let resolved = resolve_circle_obstacle_collision_bounded(
                                 next_pos,
                                 soldier_radius,
                                 &buildings,
                                 &low_walls,
+                                world_bound,
                             );
                             tf.translation.x = resolved.x;
                             tf.translation.z = resolved.y;
@@ -894,11 +966,12 @@ pub fn update_enemy(
                             };
                             let speed = base_speed * dir_mult;
                             let next_pos = enemy_pos + move_dir * speed * dt;
-                            let resolved = resolve_circle_obstacle_collision(
+                            let resolved = resolve_circle_obstacle_collision_bounded(
                                 next_pos,
                                 soldier_radius,
                                 &buildings,
                                 &low_walls,
+                                world_bound,
                             );
                             tf.translation.x = resolved.x;
                             tf.translation.z = resolved.y;
@@ -922,8 +995,8 @@ pub fn update_enemy(
             EnemyAiState::Search => {
                 // Standing during routine perimeter patrol
                 soldier.stance = Stance::Standing;
-                if level == CurrentLevel::Level3 {
-                    // Hold north-side courtyard overwatch facing South
+                if level == CurrentLevel::Level3 || level == CurrentLevel::Level4 {
+                    // Hold stationary position facing South without patrolling waypoints
                     soldier.facing_dir = Vec2::new(0.0, 1.0);
                 } else {
                     let target_wp = ENEMY_WAYPOINTS[enemy.current_waypoint_idx];
@@ -2472,5 +2545,72 @@ mod tests {
             enemy_bullets_after > 0,
             "Once unsuppressed, soldier should resume popping up and firing over cover"
         );
+    }
+
+    #[test]
+    fn test_level_4_village_enemy_squad_spawns_and_stands_still() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
+        let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+        let bullet_mesh = meshes.add(Circle::new(0.12));
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let dummy_mat = materials.add(Color::srgb(1.0, 1.0, 1.0));
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material: dummy_mat.clone(),
+            enemy_material: dummy_mat,
+        });
+        app.insert_resource(CurrentLevel::Level4);
+        app.add_systems(Startup, setup_enemy);
+        app.add_systems(Update, update_enemy);
+
+        app.update();
+
+        let initial_positions: Vec<(Vec2, Visibility)> = app
+            .world_mut()
+            .query_filtered::<(&Transform, &Visibility), With<Enemy>>()
+            .iter(app.world())
+            .map(|(tf, vis)| (Vec2::new(tf.translation.x, tf.translation.z), *vis))
+            .collect();
+
+        assert_eq!(
+            initial_positions.len(),
+            VILLAGE_ENEMY_POSITIONS.len(),
+            "test_level_4 should spawn the 9-man enemy squad in the village"
+        );
+        for (pos, vis) in &initial_positions {
+            assert_eq!(*vis, Visibility::Inherited);
+            assert!(
+                pos.x.abs() <= 40.0 && pos.y >= -55.0 && pos.y <= 50.0,
+                "Village enemy should be positioned inside the central village, got {:?}",
+                pos
+            );
+        }
+
+        // Advance time by 1.0s and ensure village enemies remain standing still (not patrolling)
+        {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_secs(1));
+        }
+        app.update();
+
+        let after_positions: Vec<Vec2> = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Enemy>>()
+            .iter(app.world())
+            .map(|tf| Vec2::new(tf.translation.x, tf.translation.z))
+            .collect();
+
+        for ((before, _), after) in initial_positions.iter().zip(after_positions.iter()) {
+            assert!(
+                (*before - *after).length() < 1e-4,
+                "Village enemy in test_level_4 should stand still and not patrol, moved from {:?} to {:?}",
+                before,
+                after
+            );
+        }
     }
 }

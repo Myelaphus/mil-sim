@@ -14,6 +14,7 @@ pub const BULLET_RADIUS: f32 = 0.14;
 
 // Soldier movement clamp margin: derived directly from world dimensions and soldier physical radius
 pub const SOLDIER_WORLD_BOUND: f32 = WORLD_HALF_SIZE - (SOLDIER_RADIUS * 2.5);
+pub const RTS_SOLDIER_WORLD_BOUND: f32 = RTS_WORLD_HALF_SIZE - (SOLDIER_RADIUS * 2.5);
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
 pub enum AppState {
@@ -37,6 +38,24 @@ pub enum SquadCommand {
     Formation,
     FlankLeft,
     FlankRight,
+}
+
+/// High-level commander order types selectable in the RTS Orders UI (`test_level_4`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OrderType {
+    TakePosition,
+}
+
+/// Currently armed order tool in the RTS Orders UI (`None` when no order tool is selected).
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SelectedOrderTool(pub Option<OrderType>);
+
+/// Active general order assigned to friendly units in `test_level_4`.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
+pub enum CommanderOrder {
+    #[default]
+    Hold,
+    TakePosition(Vec2),
 }
 
 #[derive(Component)]

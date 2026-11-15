@@ -227,7 +227,8 @@ pub fn setup_level_world(
         MeshMaterial3d(materials.add(Color::srgb(0.22, 0.35, 0.22))),
     ));
 
-    // North-to-South road for test_level_4 extending from top (-Z) to bottom (+Z) of map through the village
+    // North-to-South road for test_level_4 extending from top (-Z) to bottom (+Z) of map through the village.
+    // Placed as a flat surface at Y = 0.01 (above ground at Y = 0.0, below vision cones and soldiers at Y >= 0.035).
     if level == CurrentLevel::Level4 {
         let road_material = materials.add(StandardMaterial {
             base_color: Color::srgb(0.28, 0.28, 0.30),
@@ -237,9 +238,15 @@ pub fn setup_level_world(
         commands.spawn((
             LevelEntity,
             Road,
-            Mesh3d(meshes.add(Cuboid::new(RTS_ROAD_WIDTH, 0.08, RTS_WORLD_SIZE))),
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(RTS_ROAD_WIDTH, RTS_WORLD_SIZE),
+                ),
+            ),
             MeshMaterial3d(road_material),
-            Transform::from_xyz(0.0, 0.04, 0.0),
+            Transform::from_xyz(0.0, 0.01, 0.0),
         ));
     }
 

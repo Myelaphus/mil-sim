@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use crate::common::geometry::can_see_target;
-use crate::common::types::Soldier;
+use crate::common::types::{CurrentLevel, Soldier};
 use crate::enemy::ai::Enemy;
 use crate::friendly::Friendly;
 use crate::player::Player;
@@ -8,6 +8,7 @@ use crate::world::buildings::{Building, BuildingCollider};
 
 // Dynamically sets enemy visibility based on fire team vision cones (player & living friendlies)
 pub fn update_enemy_visibility(
+    current_level: Option<Res<CurrentLevel>>,
     player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Enemy>, Without<Friendly>)>,
     friendly_q: Query<(&Transform, &Soldier), (With<Friendly>, Without<Enemy>, Without<Player>)>,
     mut enemy_q: Query<
@@ -24,6 +25,19 @@ pub fn update_enemy_visibility(
         ),
     >,
 ) {
+    // In RTS level (Level 4), fog of war is disabled so all units are visible on the map
+    if current_level
+        .as_deref()
+        .copied()
+        .unwrap_or(CurrentLevel::Level1)
+        == CurrentLevel::Level4
+    {
+        for (_, mut vis) in &mut enemy_q {
+            *vis = Visibility::Inherited;
+        }
+        return;
+    }
+
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
 
     // Collect all fire team spotters (player and friendlies)

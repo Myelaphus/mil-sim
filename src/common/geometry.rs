@@ -1,13 +1,23 @@
 use bevy::prelude::*;
-use crate::common::types::{SOLDIER_RADIUS, SOLDIER_WORLD_BOUND};
+use crate::common::types::{CurrentLevel, RTS_SOLDIER_WORLD_BOUND, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND};
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 
 // Multi-pass circle vs obstacle (buildings + low walls) collision resolver with smooth sliding
 pub fn resolve_circle_obstacle_collision(
+    pos: Vec2,
+    radius: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+) -> Vec2 {
+    resolve_circle_obstacle_collision_bounded(pos, radius, buildings, low_walls, SOLDIER_WORLD_BOUND)
+}
+
+pub fn resolve_circle_obstacle_collision_bounded(
     mut pos: Vec2,
     radius: f32,
     buildings: &[(&Transform, &BuildingCollider)],
     low_walls: &[(&Transform, &LowWallCollider)],
+    world_bound: f32,
 ) -> Vec2 {
     for _ in 0..4 {
         // 1. Resolve collision against buildings
@@ -93,8 +103,8 @@ pub fn resolve_circle_obstacle_collision(
         }
     }
     // World boundary collision check derived from unified world dimensions
-    pos.x = pos.x.clamp(-SOLDIER_WORLD_BOUND, SOLDIER_WORLD_BOUND);
-    pos.y = pos.y.clamp(-SOLDIER_WORLD_BOUND, SOLDIER_WORLD_BOUND);
+    pos.x = pos.x.clamp(-world_bound, world_bound);
+    pos.y = pos.y.clamp(-world_bound, world_bound);
     pos
 }
 
@@ -141,10 +151,16 @@ pub fn directional_speed_multiplier(facing_dir: Vec2, move_dir: Vec2) -> f32 {
 
 // Pairwise collision resolution system ensuring soldiers cannot occupy the same point in space
 pub fn resolve_soldier_pairwise_collisions(
+    current_level: Option<Res<CurrentLevel>>,
     mut soldiers_q: Query<(Entity, &mut Transform), With<crate::common::types::Soldier>>,
     buildings_q: Query<(&Transform, &BuildingCollider), (With<crate::world::buildings::Building>, Without<crate::common::types::Soldier>)>,
     low_walls_q: Query<(&Transform, &LowWallCollider), (With<crate::world::buildings::LowWall>, Without<crate::common::types::Soldier>)>,
 ) {
+    let world_bound = if current_level.as_deref().copied().unwrap_or_default() == CurrentLevel::Level4 {
+        RTS_SOLDIER_WORLD_BOUND
+    } else {
+        SOLDIER_WORLD_BOUND
+    };
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
     let soldier_radius = SOLDIER_RADIUS;
@@ -169,8 +185,20 @@ pub fn resolve_soldier_pairwise_collisions(
                     (Vec2::new(soldier_radius, 0.0), Vec2::new(-soldier_radius, 0.0))
                 };
 
-                let new_p1 = resolve_circle_obstacle_collision(p1 + push1, soldier_radius, &buildings, &low_walls);
-                let new_p2 = resolve_circle_obstacle_collision(p2 + push2, soldier_radius, &buildings, &low_walls);
+                let new_p1 = resolve_circle_obstacle_collision_bounded(
+                    p1 + push1,
+                    soldier_radius,
+                    &buildings,
+                    &low_walls,
+                    world_bound,
+                );
+                let new_p2 = resolve_circle_obstacle_collision_bounded(
+                    p2 + push2,
+                    soldier_radius,
+                    &buildings,
+                    &low_walls,
+                    world_bound,
+                );
 
                 tf1.translation.x = new_p1.x;
                 tf1.translation.z = new_p1.y;
@@ -566,8 +594,13 @@ pub fn find_cover_position_with_offset(
             if dist > search_radius + 4.0 {
                 continue;
             }
-            let resolved =
-                resolve_circle_obstacle_collision(cand, soldier_radius, buildings, low_walls);
+            let resolved = resolve_circle_obstacle_collision_bounded(
+                cand,
+                soldier_radius,
+                buildings,
+                low_walls,
+                RTS_SOLDIER_WORLD_BOUND,
+            );
             if (resolved - cand).length_squared() > 0.04 {
                 continue;
             }
@@ -663,9 +696,21 @@ pub fn compute_flank_waypoint(
     // before advancing towards the enemy depth (`target_y`), so flankers don't cut across the open center.
     if (soldier_pos.x - flank_x).abs() > 2.0 && (soldier_pos.y - enemy_pos.y).abs() > 4.0 {
         let corner = Vec2::new(flank_x, soldier_pos.y);
-        resolve_circle_obstacle_collision(corner, soldier_radius, buildings, low_walls)
+        resolve_circle_obstacle_collision_bounded(
+            corner,
+            soldier_radius,
+            buildings,
+            low_walls,
+            RTS_SOLDIER_WORLD_BOUND,
+        )
     } else {
-        resolve_circle_obstacle_collision(final_spot, soldier_radius, buildings, low_walls)
+        resolve_circle_obstacle_collision_bounded(
+            final_spot,
+            soldier_radius,
+            buildings,
+            low_walls,
+            RTS_SOLDIER_WORLD_BOUND,
+        )
     }
 }
 

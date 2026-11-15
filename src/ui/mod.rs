@@ -1,12 +1,14 @@
 pub mod ammo;
 pub mod fps;
 pub mod menu;
+pub mod orders;
 
 use bevy::prelude::*;
 use crate::common::types::AppState;
 pub use ammo::*;
 pub use fps::*;
 pub use menu::*;
+pub use orders::*;
 
 pub struct UiPlugin;
 
@@ -21,12 +23,13 @@ impl Plugin for UiPlugin {
                 update_main_menu_interactions.run_if(in_state(AppState::MainMenu)),
             )
             .add_systems(OnExit(AppState::MainMenu), cleanup_main_menu)
-            .add_systems(OnEnter(AppState::InGame), setup_ammo_ui)
+            .add_systems(OnEnter(AppState::InGame), (setup_ammo_ui, setup_orders_ui))
             .add_systems(
                 Update,
                 (
                     check_level_end_conditions,
                     update_ammo_ui,
+                    update_orders_ui,
                 )
                     .run_if(in_state(AppState::InGame)),
             )

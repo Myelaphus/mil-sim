@@ -1,5 +1,8 @@
 use bevy::prelude::*;
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SquadId(pub usize);
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum FriendlyAiState {
     #[default]
