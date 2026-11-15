@@ -1,11 +1,11 @@
 pub mod material;
 pub mod mesh;
 
+use crate::common::types::{AppState, CurrentLevel, LevelEntity, RTS_WORLD_SIZE, WORLD_SIZE};
+use crate::world::buildings::{COMPOUND_BUILDINGS, VILLAGE_BUILDINGS};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 pub use material::*;
-use crate::common::types::{AppState, CurrentLevel, LevelEntity, RTS_WORLD_SIZE, WORLD_SIZE};
-use crate::world::buildings::{COMPOUND_BUILDINGS, VILLAGE_BUILDINGS};
 
 pub struct FogPlugin;
 
@@ -65,7 +65,7 @@ pub fn setup_fog(
         _pad1: 0.0,
         _pad2: 0.0,
         buildings: building_boxes,
-        spotters: [Vec4::ZERO; 16],
+        spotters: [Vec4::ZERO; 32],
     });
 
     commands.spawn((
@@ -73,6 +73,7 @@ pub fn setup_fog(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(plane_size, plane_size))),
         MeshMaterial3d(fog_material),
         Transform::from_xyz(0.0, 4.0, 0.0),
+        Visibility::default(),
         NotShadowCaster,
         NotShadowReceiver,
         FogOverlay,

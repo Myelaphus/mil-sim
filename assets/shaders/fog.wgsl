@@ -12,7 +12,7 @@ struct FogMaterial {
     _pad1: f32,
     _pad2: f32,
     buildings: array<vec4<f32>, 16>,
-    spotters: array<vec4<f32>, 16>,
+    spotters: array<vec4<f32>, 32>,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> material: FogMaterial;

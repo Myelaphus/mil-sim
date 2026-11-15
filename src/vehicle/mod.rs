@@ -410,10 +410,17 @@ pub struct HelicopterAutocannon {
     pub helicopter: Entity,
 }
 
+/// Attached to one of the 4 soldiers operating a `FieldArtillery` howitzer emplacement.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtilleryCrewMember {
+    pub artillery: Entity,
+    pub slot: usize,
+}
+
 /// Stationary M119A3 105mm light towed field artillery piece that can rotate very slowly on its
 /// central firing platform axis, has full-map indirect-fire range, and fires high-explosive
 /// shells that explode in a medium circle on impact when a Squad Leader calls for support
-/// and provides target coordinates.
+/// and provides target coordinates. Operated by a 4-soldier howitzer section standing behind it.
 #[derive(Component, Debug, Clone)]
 pub struct FieldArtillery {
     /// Current forward heading unit vector of the howitzer barrel on the XZ plane.
@@ -430,6 +437,8 @@ pub struct FieldArtillery {
     pub reload_timer: Timer,
     /// Hydro-pneumatic recoil displacement (`m`, kicks back on firing and smoothly recuperates to `0.0`).
     pub recoil_offset: f32,
+    /// The 4 operating crew soldiers stationed behind the howitzer.
+    pub crew: Vec<Entity>,
 }
 
 impl Default for FieldArtillery {
@@ -444,6 +453,7 @@ impl Default for FieldArtillery {
             called_by_squad_leader: false,
             reload_timer,
             recoil_offset: 0.0,
+            crew: Vec::new(),
         }
     }
 }
@@ -454,6 +464,26 @@ impl FieldArtillery {
     pub fn muzzle_world_pos(&self, artillery_pos: Vec2) -> Vec2 {
         let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
         artillery_pos + forward * ARTILLERY_BARREL_MUZZLE_OFFSET
+    }
+
+    /// World-space XZ position and 2D facing vector for one of the 4 operating crew soldiers (`slot 0..4`)
+    /// standing behind the howitzer emplacement.
+    pub fn crew_station_world_pos_and_facing(&self, artillery_pos: Vec2, slot: usize) -> (Vec2, Vec2) {
+        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
+        let right = Vec2::new(-forward.y, forward.x);
+        let (right_offset, rear_offset, splay) = match slot % 4 {
+            // Slot 0: Gunner (behind left shield / breech)
+            0 => (-1.65, 1.95, -0.15),
+            // Slot 1: Assistant Gunner / Loader (behind right shield / breech)
+            1 => (1.65, 1.95, 0.15),
+            // Slot 2: Section Chief (behind left trail spade)
+            2 => (-1.35, 3.85, -0.35),
+            // Slot 3: Ammunition Bearer (behind right trail spade)
+            _ => (1.35, 3.85, 0.35),
+        };
+        let world_pos = artillery_pos + right * right_offset - forward * rear_offset;
+        let world_facing = (forward + right * splay).normalize_or(forward);
+        (world_pos, world_facing)
     }
 }
 
@@ -496,6 +526,7 @@ impl Plugin for VehiclePlugin {
                     resolve_soldier_apc_collisions,
                     update_attack_helicopters,
                     update_field_artillery,
+                    update_artillery_crew,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
@@ -1272,6 +1303,117 @@ pub fn spawn_field_artillery(
         ChildOf(barrel_entity),
     ));
 
+    // 6. Spawn 4 operating soldiers standing around behind the howitzer, each armed with a service
+    //    rifle and equipped with their own vision cone that reveals the Fog of War.
+    let (crew_color, cone_color) = match team {
+        Team::Player => (
+            Color::srgb(0.18, 0.68, 0.88),
+            Color::srgba(0.20, 0.75, 1.0, 0.16),
+        ),
+        Team::Enemy => (
+            Color::srgb(0.90, 0.15, 0.15),
+            Color::srgba(0.95, 0.20, 0.20, 0.18),
+        ),
+    };
+    let soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
+    let pointer_mesh = meshes.add(Circle::new(0.15));
+    let soldier_mat = materials.add(StandardMaterial {
+        base_color: crew_color,
+        perceptual_roughness: 0.5,
+        ..default()
+    });
+    let pointer_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.98, 1.0),
+        unlit: true,
+        ..default()
+    });
+    let crew_cone_mesh = meshes.add(create_vision_cone_mesh(24.0, FRAC_PI_2, 16));
+    let crew_cone_mat = materials.add(StandardMaterial {
+        base_color: cone_color,
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+
+    let default_artillery = FieldArtillery {
+        heading: forward,
+        ..default()
+    };
+    let mut crew_entities = Vec::with_capacity(4);
+    for slot in 0..4 {
+        let (station_pos, station_facing) =
+            default_artillery.crew_station_world_pos_and_facing(pos, slot);
+        let station_yaw = f32::atan2(-station_facing.x, -station_facing.y);
+
+        let crew_ent = commands
+            .spawn((
+                LevelEntity,
+                Mesh3d(soldier_mesh.clone()),
+                MeshMaterial3d(soldier_mat.clone()),
+                Transform::from_xyz(station_pos.x, 0.05, station_pos.y)
+                    .with_rotation(Quat::from_rotation_y(station_yaw) * Quat::from_rotation_x(-FRAC_PI_2)),
+                Visibility::Inherited,
+                team,
+                Soldier {
+                    facing_dir: station_facing,
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::rifle_only(),
+                },
+                Suppression::default(),
+                ArtilleryCrewMember {
+                    artillery: artillery_entity,
+                    slot,
+                },
+            ))
+            .id();
+
+        if team == Team::Player {
+            commands.entity(crew_ent).insert((
+                Friendly {
+                    fireteam: 4, // Dedicated field artillery crew section
+                    slot,
+                    state: FriendlyAiState::Follow,
+                    shoot_timer: Timer::from_seconds(0.35, TimerMode::Repeating),
+                    speed: 11.0,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    target_pos: None,
+                    target_lost_timer: 0.0,
+                },
+                crate::friendly::SquadId(2), // Separate crew ID so infantry squad doctrine ignores howitzer crew
+            ));
+        }
+
+        // Direction indicator dot on the front edge of the soldier circle
+        commands.spawn((
+            Mesh3d(pointer_mesh.clone()),
+            MeshMaterial3d(pointer_mat.clone()),
+            Transform::from_xyz(0.0, 0.42, 0.015),
+            ChildOf(crew_ent),
+        ));
+
+        // Vision cone mesh child on the ground plane
+        commands.spawn((
+            Mesh3d(crew_cone_mesh.clone()),
+            MeshMaterial3d(crew_cone_mat.clone()),
+            NotShadowCaster,
+            NotShadowReceiver,
+            Transform::from_xyz(0.0, 0.0, -0.015),
+            ChildOf(crew_ent),
+        ));
+
+        crew_entities.push(crew_ent);
+    }
+
+    commands.entity(artillery_entity).insert(FieldArtillery {
+        heading: forward,
+        crew: crew_entities,
+        ..default()
+    });
+
     (artillery_entity, barrel_entity)
 }
 
@@ -1984,6 +2126,12 @@ pub fn update_field_artillery(
             artillery.recoil_offset = (artillery.recoil_offset - 1.2 * dt).max(0.0);
         }
 
+        // Retain living howitzer crew members; require at least 1 living crew soldier to operate the howitzer
+        artillery.crew.retain(|&c_ent| soldiers_q.get(c_ent).is_ok());
+        if artillery.crew.is_empty() {
+            continue;
+        }
+
         if *v_team == Team::Player {
             if let Some(coords) = sl_support_coords {
                 artillery.target_coords = Some(coords);
@@ -2153,6 +2301,7 @@ pub fn update_field_artillery(
                         .remove::<Enemy>()
                         .remove::<Friendly>()
                         .remove::<Zombie>()
+                        .remove::<ArtilleryCrewMember>()
                         .insert((
                             Corpse,
                             Visibility::Inherited,
@@ -2196,6 +2345,164 @@ pub fn update_field_artillery(
         exp_tf.scale = Vec3::splat(radius_scale);
         if exp.timer.is_finished() {
             commands.entity(exp_entity).despawn();
+        }
+    }
+}
+
+/// Updates the 4 soldiers operating each `FieldArtillery` howitzer (`ArtilleryCrewMember`):
+/// - Keeps them stationed behind the howitzer looking along their assigned security sectors so
+///   their vision cones reveal the Fog of War around the emplacement.
+/// - Allows them to engage any enemies that enter their vision cone using their service rifles.
+pub fn update_artillery_crew(
+    mut commands: Commands,
+    time: Res<Time>,
+    bullet_assets: Option<Res<BulletAssets>>,
+    mut gunshot_writer: MessageWriter<GunshotEvent>,
+    artillery_q: Query<(&Transform, &FieldArtillery), Without<ArtilleryCrewMember>>,
+    mut crew_q: Query<
+        (
+            &ArtilleryCrewMember,
+            &mut Transform,
+            &Team,
+            &mut Soldier,
+            Option<&mut Friendly>,
+        ),
+        (Without<FieldArtillery>, Without<MountedInVehicle>),
+    >,
+    other_soldiers_q: Query<
+        (&Transform, &Team),
+        (
+            With<Soldier>,
+            Without<ArtilleryCrewMember>,
+            Without<FieldArtillery>,
+            Without<MountedInVehicle>,
+        ),
+    >,
+    buildings_q: Query<
+        (&Transform, &BuildingCollider),
+        (
+            With<Building>,
+            Without<ArtilleryCrewMember>,
+            Without<FieldArtillery>,
+        ),
+    >,
+) {
+    let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+
+    for (crew, mut c_tf, c_team, mut soldier, mut friendly_opt) in &mut crew_q {
+        soldier.shoot_cooldown.tick(time.delta());
+        soldier.inventory.tick(time.delta());
+        if let Some(ref mut f) = friendly_opt {
+            f.shoot_timer.tick(time.delta());
+        }
+
+        let c_pos = Vec2::new(c_tf.translation.x, c_tf.translation.z);
+        let default_facing = if let Ok((art_tf, art)) = artillery_q.get(crew.artillery) {
+            let art_pos = Vec2::new(art_tf.translation.x, art_tf.translation.z);
+            let (_, station_facing) = art.crew_station_world_pos_and_facing(art_pos, crew.slot);
+            station_facing
+        } else {
+            soldier.facing_dir
+        };
+
+        let vision_range = friendly_opt.as_ref().map_or(24.0, |f| f.vision_range);
+        let vision_half_angle = friendly_opt
+            .as_ref()
+            .map_or(45.0_f32.to_radians(), |f| f.vision_half_angle);
+        let inner_radius = friendly_opt.as_ref().map_or(2.0, |f| f.inner_radius);
+
+        let mut nearest_visible_enemy: Option<(Vec2, f32)> = None;
+        for (e_tf, e_team) in &other_soldiers_q {
+            if *e_team == *c_team {
+                continue;
+            }
+            let e_pos = Vec2::new(e_tf.translation.x, e_tf.translation.z);
+            let dist_sq = (e_pos - c_pos).length_squared();
+            if dist_sq > vision_range * vision_range {
+                continue;
+            }
+            if can_see_target(
+                c_pos,
+                soldier.facing_dir,
+                e_pos,
+                vision_range,
+                vision_half_angle,
+                inner_radius,
+                &buildings,
+            ) || can_see_target(
+                c_pos,
+                default_facing,
+                e_pos,
+                vision_range,
+                vision_half_angle,
+                inner_radius,
+                &buildings,
+            ) {
+                if nearest_visible_enemy.is_none_or(|(_, best_d2)| dist_sq < best_d2) {
+                    nearest_visible_enemy = Some((e_pos, dist_sq));
+                }
+            }
+        }
+
+        if let Some((enemy_pos, _)) = nearest_visible_enemy {
+            let aim_dir = (enemy_pos - c_pos).normalize_or(default_facing);
+            soldier.facing_dir = aim_dir;
+            let yaw = f32::atan2(-aim_dir.x, -aim_dir.y);
+            c_tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
+
+            let ready = friendly_opt
+                .as_ref()
+                .is_none_or(|f| f.shoot_timer.is_finished())
+                && soldier.shoot_cooldown.is_finished();
+            if ready {
+                if soldier.inventory.can_fire() {
+                    let fired = soldier
+                        .inventory
+                        .active_weapon_mut()
+                        .is_some_and(|w| w.ammo.try_fire());
+                    if fired {
+                        soldier.shoot_cooldown.reset();
+                        if let Some(ref mut f) = friendly_opt {
+                            f.shoot_timer.reset();
+                        }
+                        if let Some(ref assets) = bullet_assets {
+                            let mat = match *c_team {
+                                Team::Player => assets.player_material.clone(),
+                                Team::Enemy => assets.enemy_material.clone(),
+                            };
+                            let muzzle = c_pos + aim_dir * (SOLDIER_RADIUS + 0.2);
+                            commands.spawn((
+                                LevelEntity,
+                                Mesh3d(assets.mesh.clone()),
+                                MeshMaterial3d(mat),
+                                Transform::from_xyz(muzzle.x, 0.08, muzzle.y)
+                                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                                Bullet {
+                                    origin: muzzle,
+                                    direction: aim_dir,
+                                    speed: 48.0,
+                                    lifetime: 1.2,
+                                    team: *c_team,
+                                    shooter_stance: soldier.stance,
+                                    missed_entities: Vec::new(),
+                                },
+                            ));
+                        }
+                        gunshot_writer.write(GunshotEvent {
+                            position: c_pos,
+                            shooter_team: *c_team,
+                        });
+                    }
+                } else if let Some(active) = soldier.inventory.active_weapon_mut() {
+                    if active.ammo.current_mag == 0 && active.ammo.reserve_mags > 0 {
+                        active.ammo.start_reload();
+                    }
+                }
+            }
+        } else {
+            soldier.facing_dir = default_facing;
+            let yaw = f32::atan2(-default_facing.x, -default_facing.y);
+            c_tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2);
         }
     }
 }
@@ -3042,6 +3349,7 @@ pub fn resolve_soldier_apc_collisions(
                         .remove::<Friendly>()
                         .remove::<Zombie>()
                         .remove::<VehicleCrewMember>()
+                        .remove::<ArtilleryCrewMember>()
                         .insert((
                             Corpse,
                             Visibility::Inherited,
@@ -3144,6 +3452,7 @@ mod tests {
                 resolve_soldier_apc_collisions,
                 update_attack_helicopters,
                 update_field_artillery,
+                update_artillery_crew,
             )
                 .chain(),
         );
@@ -3992,6 +4301,11 @@ mod tests {
             "FieldArtillery must rotate very slowly on its axis (got {} rad/s)",
             artillery.rotation_speed_rad
         );
+        assert_eq!(
+            artillery.crew.len(),
+            4,
+            "FieldArtillery should track 4 operating crew soldiers"
+        );
 
         let barrel = app
             .world_mut()
@@ -3999,6 +4313,42 @@ mod tests {
             .single(app.world())
             .expect("FieldArtillery must have an ArtilleryBarrel child assembly");
         assert_eq!(barrel.artillery, art_entity);
+
+        // Verify the 4 howitzer operating crew soldiers standing behind the howitzer, armed with rifles and vision cones
+        let crew_members: Vec<(Entity, &ArtilleryCrewMember, &Transform, &Soldier, &Friendly, &Children)> = app
+            .world_mut()
+            .query::<(Entity, &ArtilleryCrewMember, &Transform, &Soldier, &Friendly, &Children)>()
+            .iter(app.world())
+            .collect();
+        assert_eq!(
+            crew_members.len(),
+            4,
+            "Expected 4 ArtilleryCrewMember soldiers operating the howitzer"
+        );
+        for (_, crew, c_tf, soldier, friendly, children) in &crew_members {
+            assert_eq!(crew.artillery, art_entity);
+            // Since howitzer faces North `(0, -1)`, behind it is `+Z` (`z > LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS.y`)
+            assert!(
+                c_tf.translation.z > LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS.y + 1.0,
+                "Howitzer crew member (slot {}) should stand behind the howitzer (z > {}), got {:?}",
+                crew.slot,
+                LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS.y,
+                c_tf.translation
+            );
+            assert_eq!(
+                soldier.inventory.active_weapon().map(|w| w.weapon_type),
+                Some(crate::common::types::WeaponType::Rifle),
+                "Howitzer crew member should be armed with a rifle"
+            );
+            assert!(
+                friendly.vision_range >= 20.0,
+                "Howitzer crew member should have a Friendly vision cone for revealing Fog of War"
+            );
+            assert!(
+                children.len() >= 2,
+                "Howitzer crew member should have direction pointer and vision cone child meshes"
+            );
+        }
     }
 
     #[test]
@@ -4188,6 +4538,95 @@ mod tests {
         assert!(
             app.world().get::<Soldier>(enemy_outside).is_some(),
             "Enemy well outside the medium blast circle (25m away) should survive"
+        );
+    }
+
+    #[test]
+    fn test_howitzer_crew_vision_cones_reveal_fog_of_war_and_engage_with_rifles() {
+        let mut app = create_vehicle_test_app();
+        app.init_resource::<Assets<crate::fog::FogMaterial>>();
+        app.add_systems(
+            Startup,
+            (crate::fog::setup_fog, setup_level_vehicles),
+        );
+        app.add_systems(
+            Update,
+            (
+                crate::fog::sync_fog_uniforms,
+                crate::enemy::visibility::update_enemy_visibility,
+            ),
+        );
+        app.update();
+
+        // Spawn an enemy directly in front of the howitzer crew's vision cones (`14m` north of the howitzer)
+        let enemy_in_cone_pos =
+            LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS + LEVEL_4_FRIENDLY_ARTILLERY_FACING * 12.0;
+        let enemy_ent = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(enemy_in_cone_pos.x, 0.05, enemy_in_cone_pos.y),
+                Visibility::Hidden,
+                Team::Enemy,
+                Enemy {
+                    state: crate::enemy::ai::EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: enemy_in_cone_pos,
+                },
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        for _ in 0..10 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        // Verify the FogMaterial uniform buffer includes the 4 howitzer crew spotters
+        let fog_handle = app
+            .world_mut()
+            .query_filtered::<&MeshMaterial3d<crate::fog::FogMaterial>, With<crate::fog::FogOverlay>>()
+            .single(app.world())
+            .unwrap()
+            .clone();
+        let fog_mats = app.world().resource::<Assets<crate::fog::FogMaterial>>();
+        let fog_mat = fog_mats.get(&fog_handle).unwrap();
+        assert!(
+            fog_mat.spotter_count >= 5,
+            "FogMaterial spotter_count should include the 4 howitzer crew members, got {}",
+            fog_mat.spotter_count
+        );
+
+        // Verify the enemy in the howitzer crew's vision cones is revealed through Fog of War
+        let enemy_vis = *app.world().get::<Visibility>(enemy_ent).unwrap();
+        assert_eq!(
+            enemy_vis,
+            Visibility::Inherited,
+            "Enemy inside the howitzer crew's vision cones should be revealed in the Fog of War"
+        );
+
+        // Verify the howitzer crew fires their rifles at the visible enemy
+        let rifle_bullets = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .count();
+        assert!(
+            rifle_bullets > 0,
+            "Howitzer crew soldiers armed with rifles should fire at an enemy inside their vision cone"
         );
     }
 }

@@ -34,7 +34,7 @@ pub struct FogMaterial {
     #[uniform(0)]
     pub buildings: [Vec4; 16],
     #[uniform(0)]
-    pub spotters: [Vec4; 16],
+    pub spotters: [Vec4; 32],
 }
 
 impl Material for FogMaterial {
@@ -78,11 +78,11 @@ pub fn sync_fog_uniforms(
             }
         }
     } else {
-        // RTS mode (Level 4): populate spotters from all living friendly squad members and attack helicopters
-        let mut spotter_buf = [Vec4::ZERO; 16];
+        // RTS mode (Level 4): populate spotters from all living friendly squad members, crews, and attack helicopters
+        let mut spotter_buf = [Vec4::ZERO; 32];
         let mut count = 0usize;
         for (h_tf, team, heli) in &heli_q {
-            if *team == Team::Player && count < 16 {
+            if *team == Team::Player && count < 32 {
                 // Scale the normalized direction vector by 2.0 (`length(s_dir) == 2.0`) so `fog.wgsl`
                 // recognizes this spotter as an elevated aerial unit (`is_aerial = length(s_dir) > 1.5`)
                 // with a 38m vision range, 35° half-angle, and limited-depth building shadow occlusion.
@@ -99,7 +99,7 @@ pub fn sync_fog_uniforms(
             }
         }
         for (f_tf, f_soldier) in &friendly_q {
-            if count < 16 {
+            if count < 32 {
                 spotter_buf[count] = Vec4::new(
                     f_tf.translation.x,
                     f_tf.translation.z,

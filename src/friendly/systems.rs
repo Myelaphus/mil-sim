@@ -413,6 +413,7 @@ pub fn update_friendly(
             Without<Enemy>,
             Without<crate::vehicle::MountedInVehicle>,
             Without<crate::vehicle::VehicleCrewMember>,
+            Without<crate::vehicle::ArtilleryCrewMember>,
         ),
     >,
     player_q: Query<
