@@ -1,5 +1,3 @@
-squad leaders give orders to fire teams, rather than fire teams making automated maneuvers
-Order of Succession
 infrantry ai fixes
 apc model
 apc combat and AI

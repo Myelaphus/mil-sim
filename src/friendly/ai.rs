@@ -4,6 +4,143 @@ use std::collections::HashMap;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SquadId(pub usize);
 
+/// Standard U.S. Army Infantry Squad Order of Succession (Paragraph 5, Command and Signal, OPORD):
+/// 1. Squad Leader (Primary): `(fireteam == 0, slot == 0)` (or `(1, 0)` when no dedicated SL slot was spawned)
+/// 2. Alpha Team Leader (Senior Team Leader): `(fireteam == 1, slot == 0)` (or `(1, 1)` in 9-man `(1..=2)` layout)
+/// 3. Bravo Team Leader: `(fireteam == 2, slot == 0)` (takes command if SL and Alpha TL are casualties or
+///    Alpha TL is pinned down / separated out of communication)
+/// 4. Senior surviving squad member
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SquadLeaderRole {
+    #[default]
+    SquadLeader,
+    ActingAlphaTeamLeader,
+    ActingBravoTeamLeader,
+    ActingSeniorRifleman,
+    NoCommand,
+}
+
+impl SquadLeaderRole {
+    pub fn short_title(&self) -> &'static str {
+        match self {
+            SquadLeaderRole::SquadLeader => "SL",
+            SquadLeaderRole::ActingAlphaTeamLeader => "Acting SL: Alpha TL",
+            SquadLeaderRole::ActingBravoTeamLeader => "Acting SL: Bravo TL",
+            SquadLeaderRole::ActingSeniorRifleman => "Acting SL: Senior Rifleman",
+            SquadLeaderRole::NoCommand => "NO COMMAND",
+        }
+    }
+
+    pub fn is_acting(&self) -> bool {
+        !matches!(
+            self,
+            SquadLeaderRole::SquadLeader | SquadLeaderRole::NoCommand
+        )
+    }
+}
+
+/// Evaluates the Standard Order of Succession across a squad's living members:
+/// `(fireteam, slot, pos, is_suppressed)` and returns `Some((leader_ft, leader_slot, leader_pos, role))`.
+///
+/// Order of Succession:
+/// 1. Primary Squad Leader (`(0, 0)`, or `(1, 0)` in 9-man RTS config where `(1, 4)` exists).
+/// 2. Alpha Team Leader (`(1, 0)`, or `(1, 1)` when `(1, 0)` was Primary SL) — unless pinned down
+///    by suppression or separated (`> 32m` from squad centroid) while Bravo Team Leader `(2, 0)` is
+///    able to command.
+/// 3. Bravo Team Leader `(2, 0)` — steps up if Alpha Team Leader is a casualty, or is pinned down /
+///    separated out of communication.
+/// 4. Senior surviving rifleman in chain of command `(fireteam, slot)`.
+pub fn select_squad_commander(
+    members: &[(usize, usize, Vec2, bool)],
+    had_nine_man_sl_at_1_0: bool,
+) -> Option<(usize, usize, Vec2, SquadLeaderRole)> {
+    if members.is_empty() {
+        return None;
+    }
+
+    let centroid = members
+        .iter()
+        .fold(Vec2::ZERO, |acc, (_, _, pos, _)| acc + *pos)
+        / (members.len() as f32);
+
+    // 1. Primary Squad Leader: dedicated `(0, 0)` or `(1, 0)` in the 9-man RTS squad
+    if let Some(&(ft, slot, pos, _)) = members
+        .iter()
+        .find(|&&(ft, slot, _, _)| (ft == 0 && slot == 0) || (had_nine_man_sl_at_1_0 && ft == 1 && slot == 0))
+    {
+        return Some((ft, slot, pos, SquadLeaderRole::SquadLeader));
+    }
+
+    // Determine the candidate slot for Alpha Team Leader:
+    // - If `(1, 0)` is alive (e.g., 8-man squad after Player SL is KIA, or `(1, 0)` in smaller test squads): `(1, 0)`
+    // - Otherwise, in the 9-man RTS squad where `(1, 0)` was the Squad Leader, `(1, 1)` is the Alpha Team Leader.
+    let alpha_tl_candidate = members
+        .iter()
+        .find(|&&(ft, slot, _, _)| ft == 1 && slot == 0)
+        .copied()
+        .or_else(|| {
+            if had_nine_man_sl_at_1_0 {
+                members
+                    .iter()
+                    .find(|&&(ft, slot, _, _)| ft == 1 && slot == 1)
+                    .copied()
+            } else {
+                None
+            }
+        });
+
+    let bravo_tl_candidate = members
+        .iter()
+        .find(|&&(ft, slot, _, _)| ft == 2 && slot == 0)
+        .copied();
+
+    match (alpha_tl_candidate, bravo_tl_candidate) {
+        (Some((a_ft, a_slot, a_pos, a_suppressed)), Some((b_ft, b_slot, b_pos, b_suppressed))) => {
+            let alpha_separated = members.len() >= 3 && (a_pos - centroid).length() > 32.0;
+            let bravo_separated = members.len() >= 3 && (b_pos - centroid).length() > 32.0;
+            let alpha_out_of_comm = a_suppressed || alpha_separated;
+            let bravo_able = !b_suppressed && !bravo_separated;
+
+            // If Alpha Team Leader is pinned down or separated out of communication and Bravo TL is able,
+            // Bravo Team Leader assumes command of the squad.
+            if alpha_out_of_comm && bravo_able {
+                Some((
+                    b_ft,
+                    b_slot,
+                    b_pos,
+                    SquadLeaderRole::ActingBravoTeamLeader,
+                ))
+            } else {
+                Some((
+                    a_ft,
+                    a_slot,
+                    a_pos,
+                    SquadLeaderRole::ActingAlphaTeamLeader,
+                ))
+            }
+        }
+        (Some((a_ft, a_slot, a_pos, _)), None) => Some((
+            a_ft,
+            a_slot,
+            a_pos,
+            SquadLeaderRole::ActingAlphaTeamLeader,
+        )),
+        (None, Some((b_ft, b_slot, b_pos, _))) => Some((
+            b_ft,
+            b_slot,
+            b_pos,
+            SquadLeaderRole::ActingBravoTeamLeader,
+        )),
+        (None, None) => {
+            // Both Team Leaders are casualties: senior surviving squad member takes command
+            let &(ft, slot, pos, _) = members
+                .iter()
+                .min_by_key(|&&(ft, slot, _, _)| (ft, slot))?;
+            Some((ft, slot, pos, SquadLeaderRole::ActingSeniorRifleman))
+        }
+    }
+}
+
 /// Five primary U.S. Army Squad Leader tactical decisions following React to Contact & METT-TC assessment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SquadLeaderDecision {
@@ -92,6 +229,10 @@ pub struct SquadDoctrineEntry {
     pub phase: SquadTacticalPhase,
     pub contact_lost_timer: f32,
     pub perceived_enemy_count: usize,
+    pub leader_role: SquadLeaderRole,
+    pub leader_slot: Option<(usize, usize)>,
+    pub had_nine_man_sl_at_1_0: bool,
+    pub last_commander_order: Option<crate::common::types::CommanderOrder>,
 }
 
 impl Default for SquadDoctrineEntry {
@@ -100,6 +241,10 @@ impl Default for SquadDoctrineEntry {
             phase: SquadTacticalPhase::Normal,
             contact_lost_timer: 0.0,
             perceived_enemy_count: 0,
+            leader_role: SquadLeaderRole::SquadLeader,
+            leader_slot: None,
+            had_nine_man_sl_at_1_0: false,
+            last_commander_order: None,
         }
     }
 }
@@ -119,22 +264,37 @@ impl SquadDoctrineState {
     }
 
     pub fn summary_for_squad(&self, sq_id: usize) -> String {
-        match self.squads.get(&sq_id).map(|e| e.phase).unwrap_or_default() {
-            SquadTacticalPhase::Normal => "SQUAD 1: NORMAL (Following Commander Intent)".to_string(),
+        let entry = self.squads.get(&sq_id);
+        let phase = entry.map(|e| e.phase).unwrap_or_default();
+        let role = entry.map(|e| e.leader_role).unwrap_or_default();
+        let cmd_title = role.short_title();
+
+        match phase {
+            SquadTacticalPhase::Normal => {
+                if role.is_acting() {
+                    format!(
+                        "SQUAD 1 ({cmd_title}): NORMAL (Following Commander Intent)"
+                    )
+                } else {
+                    "SQUAD 1: NORMAL (Following Commander Intent)".to_string()
+                }
+            }
             SquadTacticalPhase::ReactToContact {
                 spotted_unaware_enemy,
                 ..
             } => {
                 if spotted_unaware_enemy {
-                    "SQUAD 1 [REACT TO CONTACT]: Visual Contact Only • SL Assessing METT-TC..."
-                        .to_string()
+                    format!(
+                        "SQUAD 1 [REACT TO CONTACT]: Visual Contact Only • {cmd_title} Assessing METT-TC..."
+                    )
                 } else {
-                    "SQUAD 1 [REACT TO CONTACT]: Taking Cover & Returning Fire • SL Assessing METT-TC..."
-                        .to_string()
+                    format!(
+                        "SQUAD 1 [REACT TO CONTACT]: Taking Cover & Returning Fire • {cmd_title} Assessing METT-TC..."
+                    )
                 }
             }
             SquadTacticalPhase::DecisionActive(decision) => {
-                format!("SQUAD 1 [SL ORDER]: {}", decision.label())
+                format!("SQUAD 1 [{cmd_title} ORDER]: {}", decision.label())
             }
         }
     }
