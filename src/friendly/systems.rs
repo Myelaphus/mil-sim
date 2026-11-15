@@ -565,8 +565,35 @@ pub fn update_friendly(
 
                     if is_autonomous_assault && !suppression.is_suppressed() {
                         // Autonomous squad Fire & Maneuver under CommanderOrder::TakePosition:
-                        // - Fire Team 1 (Alpha) closes to <= 21m with clear LOS and establishes a base of fire.
-                        // - Fire Team 2 (Bravo) flanks around obstacles and closes to <= 18m with clear LOS.
+                        // - If within firing range (<= 24m) and a waist-high wall (`low_walls`) offers cover
+                        //   between the soldier and `target`, take cover behind that low wall and fire over it.
+                        // - Otherwise Fire Team 1 (Alpha) closes to <= 21m with clear LOS as base of fire,
+                        //   while Fire Team 2 (Bravo) flanks around obstacles and closes to <= 18m with clear LOS.
+                        let lateral_offset = match (friendly.fireteam, friendly.slot) {
+                            (1, 0) => 0.0,
+                            (1, 1) => -1.8,
+                            (1, 2) => 1.8,
+                            (1, 3) => -0.9,
+                            (1, _) => 0.9,
+                            (2, 0) => -0.8,
+                            (2, 1) => -2.2,
+                            (2, 2) => 2.2,
+                            _ => 0.8,
+                        };
+                        let low_wall_cover = if dist <= 24.0 && friendly.fireteam == 1 {
+                            find_cover_position_with_offset(
+                                friendly_pos,
+                                target,
+                                &[],
+                                &low_walls,
+                                soldier_radius,
+                                12.0,
+                                lateral_offset,
+                            )
+                        } else {
+                            None
+                        };
+
                         let clear_shot = has_clear_shot_past_cover(
                             friendly_pos,
                             target,
@@ -575,7 +602,42 @@ pub fn update_friendly(
                         );
                         let engage_range = if friendly.fireteam == 1 { 21.0 } else { 18.0 };
 
-                        if clear_shot && dist <= engage_range {
+                        if let Some(cover_spot) = low_wall_cover {
+                            let to_cover = cover_spot - friendly_pos;
+                            let dist_to_cover = to_cover.length();
+                            if dist_to_cover > 0.35 {
+                                is_moving = true;
+                                soldier.stance = if dist_to_cover < 1.5 {
+                                    Stance::Crouching
+                                } else {
+                                    Stance::Standing
+                                };
+                                let desired_move = to_cover / dist_to_cover;
+                                let move_dir = find_avoidance_direction(
+                                    friendly_pos,
+                                    desired_move,
+                                    &buildings,
+                                    &low_walls,
+                                    soldier_radius,
+                                );
+                                let dir_mult =
+                                    directional_speed_multiplier(soldier.facing_dir, move_dir);
+                                let speed = friendly.speed * dir_mult;
+                                let next_pos = friendly_pos + move_dir * speed * dt;
+                                let resolved = resolve_circle_obstacle_collision_bounded(
+                                    next_pos,
+                                    soldier_radius,
+                                    &buildings,
+                                    &low_walls,
+                                    world_bound,
+                                );
+                                tf.translation.x = resolved.x;
+                                tf.translation.z = resolved.y;
+                            } else {
+                                soldier.stance = Stance::Crouching;
+                                has_clear_flank_shot = true;
+                            }
+                        } else if clear_shot && dist <= engage_range {
                             has_clear_flank_shot = true;
                             soldier.stance = Stance::Crouching;
                         } else {

@@ -287,7 +287,7 @@ pub fn setup_level_world(
     let low_walls: &[(Vec3, Vec3)] = match level {
         CurrentLevel::Level1 | CurrentLevel::Level2 => &COMPOUND_LOW_WALLS,
         CurrentLevel::Level3 => &COURTYARD_LOW_WALLS,
-        CurrentLevel::Level4 => &[],
+        CurrentLevel::Level4 => &VILLAGE_LOW_WALLS,
     };
     for &(size, position) in low_walls {
         commands.spawn((
@@ -334,6 +334,17 @@ mod tests {
         assert_eq!(
             road_count, 1,
             "test_level_4 must spawn the north-to-south road"
+        );
+
+        let low_wall_count = app
+            .world_mut()
+            .query_filtered::<&Transform, With<LowWall>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            low_wall_count,
+            VILLAGE_LOW_WALLS.len(),
+            "test_level_4 must spawn the free-standing waist-high walls around the village"
         );
 
         // Verify none of the 10 village buildings block the north-south road (X in [-4, 4])

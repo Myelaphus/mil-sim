@@ -113,4 +113,30 @@ pub const VILLAGE_BUILDINGS: [(Vec3, Vec3); 10] = [
     (Vec3::new(13.0, 3.2, 10.0), Vec3::new(18.0, 1.6, 42.0)),
 ];
 
+// 16 free-standing waist-high walls (Y = 0.75) around and within the central village for test_level_4.
+pub const VILLAGE_LOW_WALLS: [(Vec3, Vec3); 16] = [
+    // --- Southern Village Approach & Outskirts ---
+    (Vec3::new(7.0, 0.75, 1.0), Vec3::new(-9.0, 0.375, 54.0)),
+    (Vec3::new(7.0, 0.75, 1.0), Vec3::new(9.0, 0.375, 54.0)),
+    (Vec3::new(5.5, 0.75, 1.0), Vec3::new(-6.0, 0.375, 44.0)),
+    (Vec3::new(5.5, 0.75, 1.0), Vec3::new(6.5, 0.375, 44.0)),
+
+    // --- Southern & Central Village Defensive Emplacements ---
+    (Vec3::new(5.0, 0.75, 1.0), Vec3::new(-5.5, 0.375, 32.0)),
+    (Vec3::new(5.0, 0.75, 1.0), Vec3::new(5.5, 0.375, 32.0)),
+    (Vec3::new(1.0, 0.75, 6.0), Vec3::new(-8.0, 0.375, 22.0)),
+    (Vec3::new(1.0, 0.75, 6.0), Vec3::new(8.0, 0.375, 22.0)),
+    (Vec3::new(5.0, 0.75, 1.0), Vec3::new(-5.5, 0.375, 16.5)),
+    (Vec3::new(5.0, 0.75, 1.0), Vec3::new(5.5, 0.375, 16.5)),
+
+    // --- Northern Village & Flank Garden Walls ---
+    (Vec3::new(6.0, 0.75, 1.0), Vec3::new(-6.5, 0.375, -8.0)),
+    (Vec3::new(6.0, 0.75, 1.0), Vec3::new(6.5, 0.375, -8.0)),
+    (Vec3::new(1.0, 0.75, 7.0), Vec3::new(-24.0, 0.375, 14.0)),
+    (Vec3::new(1.0, 0.75, 7.0), Vec3::new(26.0, 0.375, -4.0)),
+    (Vec3::new(6.0, 0.75, 1.0), Vec3::new(-7.0, 0.375, -36.0)),
+    (Vec3::new(6.0, 0.75, 1.0), Vec3::new(7.0, 0.375, -36.0)),
+];
+
+
 
