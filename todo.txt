@@ -1,0 +1,37 @@
+squad leaders give orders to fire teams, rather than fire teams making automated maneuvers
+Order of Succession
+infrantry ai fixes
+apc model
+apc combat and AI
+tank model
+tank combat and AI
+infantry loading and unloading into apc
+attack helicopter model
+attack helicopter combat and AI
+fighter plane model
+fighter plane combat and AI
+fire team loadout differences
+artillery model
+artillery combat and AI
+trenches
+scenario editor: 
+    choose map
+    add units to map (nato symbols)
+    add objectives
+    combat maneuvers
+    launch scenario
+destructible environment:
+    craters
+    trees get destroyed
+    buildings collapse
+fire and smoke
+terrain features:
+    forest
+    river
+    elevation
+terrain type affects movement speed
+soldier stamina
+infantry occupy buildings
+injuries
+first aid
+medivac

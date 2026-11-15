@@ -2,6 +2,7 @@ use crate::common::types::{
     CommanderOrder, CurrentLevel, FogOfWarEnabled, LevelEntity, OrderType, RTS_SOLDIER_WORLD_BOUND,
     SelectedOrderTool,
 };
+use crate::friendly::SquadDoctrineState;
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
@@ -24,6 +25,9 @@ pub struct FogToggleButtonText;
 pub struct OrderStatusText;
 
 #[derive(Component)]
+pub struct SquadDoctrineText;
+
+#[derive(Component)]
 pub struct OrderObjectiveMarker;
 
 pub const ORDER_BTN_NORMAL: Color = Color::srgb(0.13, 0.18, 0.24);
@@ -38,6 +42,7 @@ pub fn setup_orders_ui(
     current_level: Option<Res<CurrentLevel>>,
     mut selected_tool: Option<ResMut<SelectedOrderTool>>,
     mut commander_order: Option<ResMut<CommanderOrder>>,
+    mut squad_doctrine: Option<ResMut<SquadDoctrineState>>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
 ) {
@@ -46,6 +51,9 @@ pub fn setup_orders_ui(
     }
     if let Some(ref mut order) = commander_order {
         **order = CommanderOrder::Hold;
+    }
+    if let Some(ref mut doctrine) = squad_doctrine {
+        **doctrine = SquadDoctrineState::default();
     }
 
     if current_level.as_deref().copied().unwrap_or_default() != CurrentLevel::Level4 {
@@ -214,6 +222,16 @@ pub fn setup_orders_ui(
                 },
                 TextColor(Color::srgb(0.75, 0.84, 0.92)),
             ));
+
+            root.spawn((
+                SquadDoctrineText,
+                Text::new("SQUAD 1: NORMAL (Following Commander Intent)"),
+                TextFont {
+                    font_size: FontSize::Px(11.5),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.78, 0.35)),
+            ));
         });
 }
 
@@ -226,6 +244,7 @@ pub fn update_orders_ui(
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     selected_tool: Option<ResMut<SelectedOrderTool>>,
     commander_order: Option<ResMut<CommanderOrder>>,
+    squad_doctrine: Option<Res<SquadDoctrineState>>,
     mut fog_enabled: Option<ResMut<FogOfWarEnabled>>,
     mut take_pos_btn_q: Query<
         (&Interaction, &mut BackgroundColor),
@@ -251,10 +270,29 @@ pub fn update_orders_ui(
             Without<ClearOrderButton>,
         ),
     >,
-    mut fog_text_q: Query<&mut Text, (With<FogToggleButtonText>, Without<OrderStatusText>)>,
+    mut fog_text_q: Query<
+        &mut Text,
+        (
+            With<FogToggleButtonText>,
+            Without<OrderStatusText>,
+            Without<SquadDoctrineText>,
+        ),
+    >,
     mut status_text_q: Query<
         (&mut Text, &mut TextColor),
-        (With<OrderStatusText>, Without<FogToggleButtonText>),
+        (
+            With<OrderStatusText>,
+            Without<FogToggleButtonText>,
+            Without<SquadDoctrineText>,
+        ),
+    >,
+    mut doctrine_text_q: Query<
+        &mut Text,
+        (
+            With<SquadDoctrineText>,
+            Without<OrderStatusText>,
+            Without<FogToggleButtonText>,
+        ),
     >,
     mut marker_q: Query<
         (&mut Transform, &mut Visibility),
@@ -469,6 +507,14 @@ pub fn update_orders_ui(
                 *vis = Visibility::Visible;
             }
         }
+    }
+
+    let summary = squad_doctrine.as_deref().map_or_else(
+        || "SQUAD 1: NORMAL (Following Commander Intent)".to_string(),
+        |d| d.summary_for_squad(0),
+    );
+    for mut text in &mut doctrine_text_q {
+        **text = summary.clone();
     }
 }
 

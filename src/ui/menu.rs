@@ -3,6 +3,7 @@ use crate::common::types::{
     SquadCommand,
 };
 use crate::enemy::ai::Enemy;
+use crate::friendly::SquadDoctrineState;
 use crate::player::Player;
 use bevy::prelude::*;
 
@@ -565,6 +566,7 @@ pub fn cleanup_level(
     mut commander_order: Option<ResMut<CommanderOrder>>,
     mut selected_tool: Option<ResMut<SelectedOrderTool>>,
     mut fog_enabled: Option<ResMut<FogOfWarEnabled>>,
+    mut squad_doctrine: Option<ResMut<SquadDoctrineState>>,
     level_entities_q: Query<Entity, With<LevelEntity>>,
 ) {
     level_end.timer = None;
@@ -580,6 +582,9 @@ pub fn cleanup_level(
     }
     if let Some(ref mut fog) = fog_enabled {
         fog.0 = true;
+    }
+    if let Some(ref mut doc) = squad_doctrine {
+        doc.reset();
     }
 
     for entity in &level_entities_q {

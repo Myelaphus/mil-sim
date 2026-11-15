@@ -34,6 +34,7 @@ fn main() {
         .init_resource::<common::types::SelectedOrderTool>()
         .init_resource::<common::types::CommanderOrder>()
         .init_resource::<common::types::FogOfWarEnabled>()
+        .init_resource::<friendly::SquadDoctrineState>()
         .add_plugins((
             WorldPlugin,
             FogPlugin,

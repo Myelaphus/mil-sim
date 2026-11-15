@@ -10,7 +10,8 @@ pub struct FriendlyPlugin;
 
 impl Plugin for FriendlyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::InGame), setup_friendly)
+        app.init_resource::<SquadDoctrineState>()
+            .add_systems(OnEnter(AppState::InGame), setup_friendly)
             .add_systems(Update, update_friendly.run_if(in_state(AppState::InGame)));
     }
 }
