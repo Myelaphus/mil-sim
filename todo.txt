@@ -36,3 +36,8 @@ injuries
 first aid
 medivac
 infrantry ai fixes
+day/night cycle
+time of day affects shadows
+darkness/shadow stealth
+night vision
+fuel usage

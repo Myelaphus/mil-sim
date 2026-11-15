@@ -81,18 +81,27 @@ pub fn update_bullets(
         }
 
         let bullet_pos = Vec2::new(tf.translation.x, tf.translation.z);
+        let is_aerial_bullet = tf.translation.y > 5.0;
 
-        // 1. Check building collision (full-height buildings block all bullets unconditionally)
+        // 1. Check building collision:
+        //    - Ground-level bullets are blocked by full-height buildings unconditionally.
+        //    - Aerial bullets fired downward from the attack helicopter pass over building roofs
+        //      during mid-flight and only collide with buildings near the ground impact end of
+        //      their trajectory.
         let mut hit_building = false;
-        for (b_tf, collider) in &buildings_q {
-            let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
-            if bullet_pos.x >= b_center.x - collider.half_size.x
-                && bullet_pos.x <= b_center.x + collider.half_size.x
-                && bullet_pos.y >= b_center.y - collider.half_size.y
-                && bullet_pos.y <= b_center.y + collider.half_size.y
-            {
-                hit_building = true;
-                break;
+        let check_building_impact =
+            !is_aerial_bullet || bullet.lifetime <= 2.5 / bullet.speed.max(1.0);
+        if check_building_impact {
+            for (b_tf, collider) in &buildings_q {
+                let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+                if bullet_pos.x >= b_center.x - collider.half_size.x
+                    && bullet_pos.x <= b_center.x + collider.half_size.x
+                    && bullet_pos.y >= b_center.y - collider.half_size.y
+                    && bullet_pos.y <= b_center.y + collider.half_size.y
+                {
+                    hit_building = true;
+                    break;
+                }
             }
         }
         if hit_building {

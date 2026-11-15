@@ -64,11 +64,16 @@ pub enum CommandGroup {
     #[default]
     InfantrySquad,
     Apc,
+    Helicopter,
 }
 
 /// Active general order assigned specifically to the friendly APC group in `test_level_4`.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
 pub struct ApcOrder(pub CommanderOrder);
+
+/// Active general order assigned specifically to the friendly Attack Helicopter group in `test_level_4`.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
+pub struct HelicopterOrder(pub CommanderOrder);
 
 /// Resource controlling whether the Fog of War overlay and enemy concealment are active.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]

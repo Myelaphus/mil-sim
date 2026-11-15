@@ -225,6 +225,10 @@ pub fn resolve_circle_building_collision(
     resolve_circle_obstacle_collision(pos, radius, buildings, &[])
 }
 
+pub const AERIAL_BUILDING_SHADOW_MIN: f32 = 4.0;
+pub const AERIAL_BUILDING_SHADOW_MAX: f32 = 9.5;
+pub const AERIAL_BUILDING_SHADOW_RATIO: f32 = 0.45;
+
 pub fn can_see_target(
     seer_pos: Vec2,
     seer_dir: Vec2,
@@ -266,6 +270,114 @@ pub fn can_see_target(
     }
 
     true
+}
+
+/// Aerial line-of-sight check (e.g. for `AttackHelicopter` hovering high above ground).
+///
+/// Buildings only cast a limited-depth blind spot (`shadow_depth`) directly behind their far wall
+/// relative to the elevated observer, so areas beyond that blind spot remain visible. Furthermore,
+/// when the helicopter is hovering directly over a building roof, that building underneath the
+/// aircraft does not obstruct its sight cone.
+pub fn can_see_target_aerial(
+    seer_pos: Vec2,
+    seer_dir: Vec2,
+    target_pos: Vec2,
+    vision_range: f32,
+    vision_half_angle: f32,
+    inner_radius: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+) -> bool {
+    let to_point = target_pos - seer_pos;
+    let dist = to_point.length();
+
+    if dist > vision_range {
+        return false;
+    }
+
+    let in_inner = dist <= inner_radius;
+    let in_cone = if dist > 0.001 {
+        let dir = to_point / dist;
+        let dot = dir.dot(seer_dir.normalize_or_zero());
+        dot >= vision_half_angle.cos()
+    } else {
+        true
+    };
+
+    if !in_inner && !in_cone {
+        return false;
+    }
+
+    for (b_tf, collider) in buildings {
+        let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+        let b_min = b_center - collider.half_size;
+        let b_max = b_center + collider.half_size;
+
+        if line_intersects_box_aerial(seer_pos, target_pos, b_min, b_max) {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn line_intersects_box_aerial(origin: Vec2, target: Vec2, b_min: Vec2, b_max: Vec2) -> bool {
+    // If target point is on/inside this building footprint, it does not occlude itself
+    if target.x >= b_min.x && target.x <= b_max.x && target.y >= b_min.y && target.y <= b_max.y {
+        return false;
+    }
+
+    // If the aerial observer is directly over this building's roof footprint, the building
+    // underneath the aircraft does not block its downward/forward sight cone.
+    if origin.x >= b_min.x && origin.x <= b_max.x && origin.y >= b_min.y && origin.y <= b_max.y {
+        return false;
+    }
+
+    let delta = target - origin;
+    let mut tmin = 0.0_f32;
+    let mut tmax = 1.0_f32;
+
+    if delta.x.abs() > 0.0001 {
+        let inv_dx = 1.0 / delta.x;
+        let mut t1 = (b_min.x - origin.x) * inv_dx;
+        let mut t2 = (b_max.x - origin.x) * inv_dx;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmin > tmax {
+            return false;
+        }
+    } else if origin.x < b_min.x || origin.x > b_max.x {
+        return false;
+    }
+
+    if delta.y.abs() > 0.0001 {
+        let inv_dy = 1.0 / delta.y;
+        let mut t1 = (b_min.y - origin.y) * inv_dy;
+        let mut t2 = (b_max.y - origin.y) * inv_dy;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+        if tmin > tmax {
+            return false;
+        }
+    } else if origin.y < b_min.y || origin.y > b_max.y {
+        return false;
+    }
+
+    if tmin < 0.999 && tmax > 0.001 {
+        let total_dist = delta.length();
+        let exit_dist = tmax * total_dist;
+        let dist_behind_building = (1.0 - tmax) * total_dist;
+        let shadow_depth = (exit_dist * AERIAL_BUILDING_SHADOW_RATIO)
+            .clamp(AERIAL_BUILDING_SHADOW_MIN, AERIAL_BUILDING_SHADOW_MAX);
+        dist_behind_building <= shadow_depth
+    } else {
+        false
+    }
 }
 
 pub fn line_intersects_box(origin: Vec2, target: Vec2, b_min: Vec2, b_max: Vec2) -> bool {
@@ -1019,6 +1131,79 @@ mod tests {
             (enemy_cover.y - (-9.35)).abs() < 0.1 && (enemy_cover.x - (-3.0)).abs() < 0.1,
             "Enemy cover spot should be directly behind north wall (-3.0, -9.35), got {:?}",
             enemy_cover
+        );
+    }
+
+    #[test]
+    fn test_aerial_line_of_sight_blocks_area_directly_behind_building_but_sees_beyond_and_when_directly_over() {
+        let building_tf = Transform::from_xyz(0.0, 1.5, 0.0);
+        let building_col = BuildingCollider {
+            half_size: Vec2::new(3.0, 3.0),
+        };
+        let buildings = [(&building_tf, &building_col)];
+        let facing = Vec2::new(-1.0, 0.0); // Looking West (-X)
+        let vision_range = 38.0;
+        let vision_half_angle = 35.0_f32.to_radians();
+
+        // 1. Helicopter hovering East of the building at (8.0, 0.0) looking West (-X) across building [-3..3]:
+        //    - Ray exits far wall at x = -3.0 (exit_dist = 11.0m -> shadow_depth = 4.95m, covering x in [-7.95, -3.0]).
+        let heli_east = Vec2::new(8.0, 0.0);
+        let directly_behind = Vec2::new(-5.0, 0.0); // 2.0m behind back wall -> obstructed!
+        let beyond_building = Vec2::new(-14.0, 0.0); // 11.0m behind back wall -> visible from above!
+
+        assert!(
+            !can_see_target_aerial(
+                heli_east,
+                facing,
+                directly_behind,
+                vision_range,
+                vision_half_angle,
+                3.0,
+                &buildings,
+            ),
+            "Area directly behind the building (-5, 0) should be obstructed even for an aerial spotter"
+        );
+        assert!(
+            can_see_target_aerial(
+                heli_east,
+                facing,
+                beyond_building,
+                vision_range,
+                vision_half_angle,
+                3.0,
+                &buildings,
+            ),
+            "Area beyond the building's shadow (-14, 0) should be visible to an aerial spotter"
+        );
+
+        // Compare with ground unit: ground unit at (8.0, 0.0) cannot see (-14.0, 0.0)
+        assert!(
+            !can_see_target(
+                heli_east,
+                facing,
+                beyond_building,
+                vision_range,
+                vision_half_angle,
+                3.0,
+                &buildings,
+            ),
+            "Ground spotter should still be completely blocked at (-14, 0)"
+        );
+
+        // 2. Helicopter hovering directly OVER the building at (0.0, 0.0):
+        //    - The building directly underneath the helicopter should NOT disrupt its sight cone!
+        let heli_over_roof = Vec2::new(0.0, 0.0);
+        assert!(
+            can_see_target_aerial(
+                heli_over_roof,
+                facing,
+                directly_behind,
+                vision_range,
+                vision_half_angle,
+                3.0,
+                &buildings,
+            ),
+            "Helicopter directly over a building roof should have an unobstructed sight cone past that building's edge"
         );
     }
 }

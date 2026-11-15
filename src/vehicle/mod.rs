@@ -1,11 +1,14 @@
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 use crate::combat::bullet::{Bullet, BulletAssets, CorpseAssets};
-use crate::common::geometry::{can_see_target, resolve_circle_obstacle_collision_bounded};
+use crate::common::geometry::{
+    can_see_target, can_see_target_aerial, resolve_circle_obstacle_collision_bounded,
+};
 use crate::common::types::{
     ApcOrder, AppState, BloodDecal, CommanderOrder, Corpse, CurrentLevel, GunshotEvent,
-    LevelEntity, RTS_SOLDIER_WORLD_BOUND, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance,
-    Suppression, Team,
+    HelicopterOrder, LevelEntity, RTS_SOLDIER_WORLD_BOUND, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND,
+    Soldier, Stance, Suppression, Team,
 };
 use crate::enemy::ai::{Enemy, Zombie};
 use crate::fog::mesh::create_vision_cone_mesh;
@@ -39,6 +42,50 @@ pub const APC_LETHAL_IMPACT_SPEED: f32 = 4.2;
 /// Default spawn position for the friendly APC on the road south of the infantry squad in `test_level_4`.
 pub const LEVEL_4_FRIENDLY_APC_SPAWN_POS: Vec2 = Vec2::new(0.0, 202.0);
 pub const LEVEL_4_FRIENDLY_APC_FACING: Vec2 = Vec2::new(0.0, -1.0);
+
+/// Realistic Attack Helicopter scale constants (AH-64 Apache / AH-1Z Viper gunship proportions):
+/// - Main fuselage is a large elongated oval (`Sphere::new(1.0)` scaled into an ellipsoid)
+/// - Tail boom is a long rectangular section extending rearward (`+Z`) from the fuselage
+/// - Top main rotor and rear tail rotor spin rapidly
+pub const HELICOPTER_BODY_WIDTH: f32 = 2.9;
+pub const HELICOPTER_BODY_HEIGHT: f32 = 2.3;
+pub const HELICOPTER_BODY_LENGTH: f32 = 8.8;
+pub const HELICOPTER_TAIL_WIDTH: f32 = 0.62;
+pub const HELICOPTER_TAIL_HEIGHT: f32 = 0.68;
+pub const HELICOPTER_TAIL_LENGTH: f32 = 6.2;
+pub const HELICOPTER_ROTOR_DIAMETER: f32 = 11.6;
+pub const HELICOPTER_ROTOR_BLADE_CHORD: f32 = 0.38;
+pub const HELICOPTER_HOVER_ALTITUDE: f32 = 11.5;
+pub const HELICOPTER_MAIN_ROTOR_SPIN_RATE_RAD: f32 = 28.0;
+pub const HELICOPTER_TAIL_ROTOR_SPIN_RATE_RAD: f32 = 42.0;
+
+/// Attack Helicopter directional speed hierarchy (`forward > strafe > backward`):
+/// - Moving forward is fastest (`22.0 m/s`),
+/// - Strafing side-to-side is intermediate (`13.5 m/s`),
+/// - Moving backward is slowest (`8.0 m/s`).
+pub const HELICOPTER_MAX_FORWARD_SPEED: f32 = 22.0;
+pub const HELICOPTER_MAX_STRAFE_SPEED: f32 = 13.5;
+pub const HELICOPTER_MAX_BACKWARD_SPEED: f32 = 8.0;
+pub const HELICOPTER_ACCEL: f32 = 16.0;
+pub const HELICOPTER_DECEL: f32 = 18.0;
+pub const HELICOPTER_YAW_RATE_RAD: f32 = 2.4;
+/// Distance threshold (`m`) above which the helicopter turns its nose to point in the direction
+/// of travel and flies forward nose-first rather than strafing/backing up in place.
+pub const HELICOPTER_LONG_TRANSIT_DIST: f32 = 22.0;
+
+/// Limited-arc chin autocannon constants (`±70°` = `140°` total forward traverse arc):
+pub const HELICOPTER_CANNON_MAX_YAW_RAD: f32 = 1.2217305; // 70 degrees in radians
+pub const HELICOPTER_CANNON_SLEW_RATE_RAD: f32 = 4.5;
+pub const HELICOPTER_CANNON_VISION_RANGE: f32 = 38.0;
+pub const HELICOPTER_CANNON_FIRE_INTERVAL_SECS: f32 = 0.16;
+/// Forward offset (`m`) from the helicopter center (`next_pos`) to the nose-mounted chin autocannon pivot.
+pub const HELICOPTER_CANNON_MOUNT_FORWARD: f32 = HELICOPTER_BODY_LENGTH * 0.49;
+/// Distance (`m`) from the chin autocannon turret pivot to the barrel muzzle tip along `cannon_world_dir()`.
+pub const HELICOPTER_CANNON_BARREL_TIP_OFFSET: f32 = 1.55;
+
+/// Default spawn position for the friendly Attack Helicopter in `test_level_4` (west of the southern approach road).
+pub const LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS: Vec2 = Vec2::new(-16.0, 192.0);
+pub const LEVEL_4_FRIENDLY_HELICOPTER_FACING: Vec2 = Vec2::new(0.0, -1.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VehicleCrewRole {
@@ -178,6 +225,174 @@ pub struct ApcTurret {
     pub vehicle: Entity,
 }
 
+/// Reusable Attack Helicopter entity with an elongated oval fuselage, rectangular tail boom,
+/// rapidly spinning top main rotor and rear tail rotor, directional flight kinematics
+/// (`forward > strafe > backward`), and a limited-arc rotating chin autocannon.
+#[derive(Component, Debug, Clone)]
+pub struct AttackHelicopter {
+    /// Forward heading unit vector on the XZ plane.
+    pub heading: Vec2,
+    /// Hover altitude above ground (`Y` coordinate in world space).
+    pub hover_altitude: f32,
+    /// Current signed longitudinal speed (`m/s`) along `heading`:
+    /// positive = flying forward (`[0, max_forward_speed]`),
+    /// negative = flying backward (`[-max_backward_speed, 0]`).
+    pub forward_speed: f32,
+    /// Current signed lateral strafe speed (`m/s`) along `right_dir()`:
+    /// positive = strafing right, negative = strafing left (`[-max_strafe_speed, max_strafe_speed]`).
+    pub strafe_speed: f32,
+    /// Maximum forward flight speed (`m/s`) — fastest movement mode.
+    pub max_forward_speed: f32,
+    /// Maximum lateral side-to-side strafe speed (`m/s`) — faster than backward, slower than forward.
+    pub max_strafe_speed: f32,
+    /// Maximum backward flight speed (`m/s`) — slowest movement mode.
+    pub max_backward_speed: f32,
+    /// Flight thrust acceleration (`m/s²`).
+    pub acceleration: f32,
+    /// Flight braking/hover deceleration (`m/s²`).
+    pub deceleration: f32,
+    /// Yaw rotation rate (`rad/s`) when turning the nose toward a long-distance flight direction.
+    pub yaw_rate_rad: f32,
+    /// When `true`, locks the helicopter's nose heading so it translates purely via forward/backward/strafe.
+    /// When `false` (default), traveling long distances (`> HELICOPTER_LONG_TRANSIT_DIST`) rotates the
+    /// nose into the direction of movement and flies forward nose-first.
+    pub maintain_heading: bool,
+    /// Active movement order (`VehicleOrder::Hold` or `VehicleOrder::MoveTo(Vec2)`).
+    pub order: VehicleOrder,
+    /// Current local yaw angle (`radians`) of the chin autocannon relative to `heading`,
+    /// strictly clamped to `[-cannon_max_yaw_rad, cannon_max_yaw_rad]`.
+    pub cannon_yaw_local: f32,
+    /// Half-angle of the chin autocannon's limited traverse arc (`radians`, default `±70°`).
+    pub cannon_max_yaw_rad: f32,
+    /// Angular slew speed of the chin autocannon (`rad/s`).
+    pub cannon_slew_rate_rad: f32,
+    /// Maximum target acquisition and engagement range of the chin autocannon (`m`).
+    pub cannon_vision_range: f32,
+    /// Repeating fire timer for the 30mm chin autocannon.
+    pub cannon_shoot_timer: Timer,
+    /// Current main rotor rotation angle (`radians`, around local `Y` axis).
+    pub main_rotor_angle: f32,
+    /// Angular velocity of the top main rotor (`rad/s`).
+    pub main_rotor_spin_rate_rad: f32,
+    /// Current tail rotor rotation angle (`radians`, around local `X` axis).
+    pub tail_rotor_angle: f32,
+    /// Angular velocity of the tail rotor (`rad/s`).
+    pub tail_rotor_spin_rate_rad: f32,
+}
+
+impl Default for AttackHelicopter {
+    fn default() -> Self {
+        Self {
+            heading: LEVEL_4_FRIENDLY_HELICOPTER_FACING,
+            hover_altitude: HELICOPTER_HOVER_ALTITUDE,
+            forward_speed: 0.0,
+            strafe_speed: 0.0,
+            max_forward_speed: HELICOPTER_MAX_FORWARD_SPEED,
+            max_strafe_speed: HELICOPTER_MAX_STRAFE_SPEED,
+            max_backward_speed: HELICOPTER_MAX_BACKWARD_SPEED,
+            acceleration: HELICOPTER_ACCEL,
+            deceleration: HELICOPTER_DECEL,
+            yaw_rate_rad: HELICOPTER_YAW_RATE_RAD,
+            maintain_heading: false,
+            order: VehicleOrder::Hold,
+            cannon_yaw_local: 0.0,
+            cannon_max_yaw_rad: HELICOPTER_CANNON_MAX_YAW_RAD,
+            cannon_slew_rate_rad: HELICOPTER_CANNON_SLEW_RATE_RAD,
+            cannon_vision_range: HELICOPTER_CANNON_VISION_RANGE,
+            cannon_shoot_timer: Timer::from_seconds(
+                HELICOPTER_CANNON_FIRE_INTERVAL_SECS,
+                TimerMode::Repeating,
+            ),
+            main_rotor_angle: 0.0,
+            main_rotor_spin_rate_rad: HELICOPTER_MAIN_ROTOR_SPIN_RATE_RAD,
+            tail_rotor_angle: 0.0,
+            tail_rotor_spin_rate_rad: HELICOPTER_TAIL_ROTOR_SPIN_RATE_RAD,
+        }
+    }
+}
+
+impl AttackHelicopter {
+    /// World-space right vector perpendicular to `heading` on the XZ plane.
+    pub fn right_dir(&self) -> Vec2 {
+        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        Vec2::new(-forward.y, forward.x)
+    }
+
+    /// World-space 2D planar velocity vector (`m/s`) combining forward/backward and strafe movement.
+    pub fn velocity_2d(&self) -> Vec2 {
+        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let right = self.right_dir();
+        forward * self.forward_speed + right * self.strafe_speed
+    }
+
+    /// Computes the anisotropic maximum speed (`m/s`) for a body-local direction `(local_forward, local_right)`:
+    /// - Pure forward (`(1, 0)`): `self.max_forward_speed` (`22.0 m/s`)
+    /// - Pure strafe (`(0, ±1)`): `self.max_strafe_speed` (`13.5 m/s`)
+    /// - Pure backward (`(-1, 0)`): `self.max_backward_speed` (`8.0 m/s`)
+    pub fn max_speed_for_local_dir(&self, local_forward: f32, local_right: f32) -> f32 {
+        let dir = Vec2::new(local_forward, local_right).normalize_or_zero();
+        if dir.length_squared() < 1e-6 {
+            return 0.0;
+        }
+        let max_long = if dir.x >= 0.0 {
+            self.max_forward_speed.max(0.1)
+        } else {
+            self.max_backward_speed.max(0.1)
+        };
+        let max_lat = self.max_strafe_speed.max(0.1);
+        let denom = ((dir.x / max_long).powi(2) + (dir.y / max_lat).powi(2)).sqrt();
+        if denom > 1e-6 {
+            1.0 / denom
+        } else {
+            0.0
+        }
+    }
+
+    /// World-space 2D aiming direction of the limited-arc chin autocannon.
+    pub fn cannon_world_dir(&self) -> Vec2 {
+        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let fuselage_yaw = f32::atan2(-forward.x, -forward.y);
+        let clamped_local = self
+            .cannon_yaw_local
+            .clamp(-self.cannon_max_yaw_rad, self.cannon_max_yaw_rad);
+        let total_yaw = fuselage_yaw + clamped_local;
+        Vec2::new(-total_yaw.sin(), -total_yaw.cos()).normalize_or(forward)
+    }
+
+    /// World-space XZ position of the nose-mounted chin autocannon turret pivot given the
+    /// helicopter's world XZ center position `heli_pos`.
+    pub fn cannon_world_pos(&self, heli_pos: Vec2) -> Vec2 {
+        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        heli_pos + forward * HELICOPTER_CANNON_MOUNT_FORWARD
+    }
+
+    /// World-space XZ position of the autocannon barrel muzzle tip given the helicopter's
+    /// world XZ center position `heli_pos`.
+    pub fn cannon_muzzle_world_pos(&self, heli_pos: Vec2) -> Vec2 {
+        let mount_pos = self.cannon_world_pos(heli_pos);
+        let cannon_dir = self.cannon_world_dir();
+        mount_pos + cannon_dir * HELICOPTER_CANNON_BARREL_TIP_OFFSET
+    }
+}
+
+/// Marker component for the rapidly spinning top main rotor assembly on an `AttackHelicopter`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HelicopterMainRotor {
+    pub helicopter: Entity,
+}
+
+/// Marker component for the rapidly spinning tail anti-torque rotor on an `AttackHelicopter`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HelicopterTailRotor {
+    pub helicopter: Entity,
+}
+
+/// Marker component for the limited-arc rotating chin autocannon turret on an `AttackHelicopter`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HelicopterAutocannon {
+    pub helicopter: Entity,
+}
+
 pub struct VehiclePlugin;
 
 impl Plugin for VehiclePlugin {
@@ -190,6 +405,7 @@ impl Plugin for VehiclePlugin {
                     update_crewed_apc_vehicles,
                     update_dismounted_crew_return,
                     resolve_soldier_apc_collisions,
+                    update_attack_helicopters,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
@@ -337,6 +553,8 @@ pub fn spawn_apc_with_crew(
     commands.spawn((
         Mesh3d(turret_vision_cone_mesh),
         MeshMaterial3d(turret_vision_cone_mat.clone()),
+        NotShadowCaster,
+        NotShadowReceiver,
         Transform::from_xyz(
             0.0,
             -(APC_HULL_HEIGHT * 0.5 + APC_TURRET_HEIGHT * 0.5 - 0.04),
@@ -436,7 +654,330 @@ pub fn spawn_apc_with_crew(
     (apc_entity, driver_entity, gunner_entity)
 }
 
-/// Spawns the friendly APC on the road south of the village in `test_level_4`.
+/// Spawns a reusable Attack Helicopter with:
+/// - A large elongated oval fuselage (`Sphere::new(1.0)` scaled to `HELICOPTER_BODY_WIDTH × HELICOPTER_BODY_HEIGHT × HELICOPTER_BODY_LENGTH`),
+/// - Tandem armored cockpit canopy, stub wings with engine nacelles & under-wing rocket pods, and nose sensor/chin turret,
+/// - A long rectangular tail boom (`Cuboid::new(HELICOPTER_TAIL_WIDTH, HELICOPTER_TAIL_HEIGHT, HELICOPTER_TAIL_LENGTH)`) with horizontal stabilizer and vertical tail fin,
+/// - Rapidly spinning 4-blade top main rotor (`HelicopterMainRotor`) and anti-torque tail rotor (`HelicopterTailRotor`).
+pub fn spawn_attack_helicopter(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    team: Team,
+    spawn_pos: Vec2,
+    facing: Vec2,
+) -> (Entity, Entity, Entity) {
+    let forward = facing.normalize_or(Vec2::new(0.0, -1.0));
+    let fuselage_yaw = f32::atan2(-forward.x, -forward.y);
+
+    let (body_color, accent_color, canopy_color, rotor_blade_color, rotor_disc_color) = match team {
+        Team::Player => (
+            Color::srgb(0.22, 0.35, 0.27),
+            Color::srgb(0.16, 0.27, 0.21),
+            Color::srgb(0.62, 0.78, 0.86),
+            Color::srgb(0.12, 0.14, 0.14),
+            Color::srgba(0.18, 0.22, 0.20, 0.18),
+        ),
+        Team::Enemy => (
+            Color::srgb(0.40, 0.22, 0.20),
+            Color::srgb(0.30, 0.16, 0.15),
+            Color::srgb(0.75, 0.62, 0.58),
+            Color::srgb(0.14, 0.12, 0.12),
+            Color::srgba(0.24, 0.16, 0.16, 0.18),
+        ),
+    };
+
+    let unit_sphere_mesh = meshes.add(Sphere::new(1.0));
+    let body_mat = materials.add(StandardMaterial {
+        base_color: body_color,
+        perceptual_roughness: 0.68,
+        metallic: 0.25,
+        ..default()
+    });
+    let accent_mat = materials.add(StandardMaterial {
+        base_color: accent_color,
+        perceptual_roughness: 0.62,
+        metallic: 0.3,
+        ..default()
+    });
+    let canopy_mat = materials.add(StandardMaterial {
+        base_color: canopy_color,
+        perceptual_roughness: 0.2,
+        metallic: 0.1,
+        ..default()
+    });
+    let dark_metal_mat = materials.add(StandardMaterial {
+        base_color: rotor_blade_color,
+        perceptual_roughness: 0.45,
+        metallic: 0.5,
+        ..default()
+    });
+    let rotor_disc_mat = materials.add(StandardMaterial {
+        base_color: rotor_disc_color,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        unlit: true,
+        ..default()
+    });
+
+    // Root helicopter entity hovered above the battlefield
+    let helicopter_entity = commands
+        .spawn((
+            LevelEntity,
+            Transform::from_xyz(spawn_pos.x, HELICOPTER_HOVER_ALTITUDE, spawn_pos.y)
+                .with_rotation(Quat::from_rotation_y(fuselage_yaw)),
+            Visibility::default(),
+            team,
+            AttackHelicopter {
+                heading: forward,
+                hover_altitude: HELICOPTER_HOVER_ALTITUDE,
+                ..default()
+            },
+        ))
+        .id();
+
+    // 1. Main Fuselage: large elongated oval (`Sphere::new(1.0)` scaled to 2.9m × 2.3m × 8.8m)
+    commands.spawn((
+        Mesh3d(unit_sphere_mesh.clone()),
+        MeshMaterial3d(body_mat.clone()),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::new(
+            HELICOPTER_BODY_WIDTH * 0.5,
+            HELICOPTER_BODY_HEIGHT * 0.5,
+            HELICOPTER_BODY_LENGTH * 0.5,
+        )),
+        ChildOf(helicopter_entity),
+    ));
+
+    // Tandem cockpit canopy (raised elongated oval glass bubble on forward-upper fuselage)
+    commands.spawn((
+        Mesh3d(unit_sphere_mesh.clone()),
+        MeshMaterial3d(canopy_mat),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.48, -1.35).with_scale(Vec3::new(0.88, 0.55, 2.35)),
+        ChildOf(helicopter_entity),
+    ));
+
+    // Nose FLIR/TADS sensor turret dome + rotating limited-arc chin 30mm autocannon (`-Z` is forward)
+    let sensor_dome_mesh = meshes.add(Sphere::new(0.42));
+    let chin_turret_hub_mesh = meshes.add(Cylinder::new(0.28, 0.30));
+    let chin_gun_mesh = meshes.add(Cuboid::new(0.16, 0.16, 1.55));
+    let cannon_cone_color = match team {
+        Team::Player => Color::srgba(0.25, 0.85, 1.0, 0.12),
+        Team::Enemy => Color::srgba(0.95, 0.25, 0.20, 0.12),
+    };
+    let cannon_vision_cone_mesh = meshes.add(create_vision_cone_mesh(
+        HELICOPTER_CANNON_VISION_RANGE,
+        35.0_f32.to_radians(),
+        16,
+    ));
+    let cannon_vision_cone_mat = materials.add(StandardMaterial {
+        base_color: cannon_cone_color,
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    });
+
+    commands.spawn((
+        Mesh3d(sensor_dome_mesh),
+        MeshMaterial3d(dark_metal_mat.clone()),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, -0.18, -HELICOPTER_BODY_LENGTH * 0.49),
+        ChildOf(helicopter_entity),
+    ));
+
+    let cannon_turret_entity = commands
+        .spawn((
+            HelicopterAutocannon {
+                helicopter: helicopter_entity,
+            },
+            Mesh3d(chin_turret_hub_mesh),
+            MeshMaterial3d(dark_metal_mat.clone()),
+            NotShadowReceiver,
+            Transform::from_xyz(0.0, -0.34, -HELICOPTER_CANNON_MOUNT_FORWARD),
+            ChildOf(helicopter_entity),
+        ))
+        .id();
+
+    commands.spawn((
+        Mesh3d(chin_gun_mesh),
+        MeshMaterial3d(dark_metal_mat.clone()),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, -0.02, -0.78),
+        ChildOf(cannon_turret_entity),
+    ));
+
+    commands.spawn((
+        Mesh3d(cannon_vision_cone_mesh),
+        MeshMaterial3d(cannon_vision_cone_mat),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, -(HELICOPTER_HOVER_ALTITUDE - 0.34 - 0.035), 0.0)
+            .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+        ChildOf(cannon_turret_entity),
+    ));
+
+    // Stub wings + twin turboshaft engine nacelles + under-wing rocket pods
+    let stub_wing_mesh = meshes.add(Cuboid::new(5.2, 0.20, 1.15));
+    let nacelle_mesh = meshes.add(Cuboid::new(0.68, 0.65, 2.45));
+    let rocket_pod_mesh = meshes.add(Cylinder::new(0.26, 1.75));
+    commands.spawn((
+        Mesh3d(stub_wing_mesh),
+        MeshMaterial3d(accent_mat.clone()),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.05, 0.25),
+        ChildOf(helicopter_entity),
+    ));
+    for side in [-1.0_f32, 1.0_f32] {
+        // Side engine nacelle
+        commands.spawn((
+            Mesh3d(nacelle_mesh.clone()),
+            MeshMaterial3d(accent_mat.clone()),
+            NotShadowReceiver,
+            Transform::from_xyz(side * 1.22, 0.34, 0.35),
+            ChildOf(helicopter_entity),
+        ));
+        // Under-wing rocket pod (rotated to point forward along -Z)
+        commands.spawn((
+            Mesh3d(rocket_pod_mesh.clone()),
+            MeshMaterial3d(dark_metal_mat.clone()),
+            NotShadowReceiver,
+            Transform::from_xyz(side * 2.05, -0.24, 0.15)
+                .with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
+            ChildOf(helicopter_entity),
+        ));
+    }
+
+    // 2. Tail Boom: long rectangular shape extending rearward (+Z) from the back of the oval body
+    let tail_boom_mesh = meshes.add(Cuboid::new(
+        HELICOPTER_TAIL_WIDTH,
+        HELICOPTER_TAIL_HEIGHT,
+        HELICOPTER_TAIL_LENGTH,
+    ));
+    let tail_boom_z = HELICOPTER_BODY_LENGTH * 0.38 + HELICOPTER_TAIL_LENGTH * 0.5;
+    commands.spawn((
+        Mesh3d(tail_boom_mesh),
+        MeshMaterial3d(body_mat),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.18, tail_boom_z),
+        ChildOf(helicopter_entity),
+    ));
+
+    // Horizontal tailplane stabilizer + vertical tail fin at the rear of the rectangular tail boom
+    let tail_end_z = tail_boom_z + HELICOPTER_TAIL_LENGTH * 0.45;
+    let horiz_stab_mesh = meshes.add(Cuboid::new(2.55, 0.14, 0.65));
+    let vert_fin_mesh = meshes.add(Cuboid::new(0.20, 1.40, 0.95));
+    commands.spawn((
+        Mesh3d(horiz_stab_mesh),
+        MeshMaterial3d(accent_mat.clone()),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.12, tail_end_z - 0.25),
+        ChildOf(helicopter_entity),
+    ));
+    commands.spawn((
+        Mesh3d(vert_fin_mesh),
+        MeshMaterial3d(accent_mat),
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.68, tail_end_z),
+        ChildOf(helicopter_entity),
+    ));
+
+    // 3. Top Main Rotor Assembly: central rotor mast + 4 crossed blades + non-shadow-casting rotor blur disc
+    let rotor_mast_mesh = meshes.add(Cylinder::new(0.28, 0.48));
+    let blade_span_x_mesh = meshes.add(Cuboid::new(
+        HELICOPTER_ROTOR_DIAMETER,
+        0.06,
+        HELICOPTER_ROTOR_BLADE_CHORD,
+    ));
+    let blade_span_z_mesh = meshes.add(Cuboid::new(
+        HELICOPTER_ROTOR_BLADE_CHORD,
+        0.06,
+        HELICOPTER_ROTOR_DIAMETER,
+    ));
+    let rotor_disc_mesh = meshes.add(Circle::new(HELICOPTER_ROTOR_DIAMETER * 0.5));
+
+    let main_rotor_entity = commands
+        .spawn((
+            HelicopterMainRotor {
+                helicopter: helicopter_entity,
+            },
+            Mesh3d(rotor_mast_mesh),
+            MeshMaterial3d(dark_metal_mat.clone()),
+            NotShadowCaster,
+            NotShadowReceiver,
+            Transform::from_xyz(0.0, HELICOPTER_BODY_HEIGHT * 0.5 + 0.24, 0.15),
+            ChildOf(helicopter_entity),
+        ))
+        .id();
+
+    commands.spawn((
+        Mesh3d(blade_span_x_mesh),
+        MeshMaterial3d(dark_metal_mat.clone()),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.14, 0.0),
+        ChildOf(main_rotor_entity),
+    ));
+    commands.spawn((
+        Mesh3d(blade_span_z_mesh),
+        MeshMaterial3d(dark_metal_mat.clone()),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.14, 0.0),
+        ChildOf(main_rotor_entity),
+    ));
+    commands.spawn((
+        Mesh3d(rotor_disc_mesh),
+        MeshMaterial3d(rotor_disc_mat),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::from_xyz(0.0, 0.12, 0.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+        ChildOf(main_rotor_entity),
+    ));
+
+    // 4. Tail Rotor Assembly: side-mounted anti-torque rotor blades on the vertical tail fin
+    let tail_hub_mesh = meshes.add(Cylinder::new(0.12, 0.24));
+    let tail_blade_a_mesh = meshes.add(Cuboid::new(0.06, 2.15, 0.20));
+    let tail_blade_b_mesh = meshes.add(Cuboid::new(0.06, 0.20, 2.15));
+
+    let tail_rotor_entity = commands
+        .spawn((
+            HelicopterTailRotor {
+                helicopter: helicopter_entity,
+            },
+            Mesh3d(tail_hub_mesh),
+            MeshMaterial3d(dark_metal_mat.clone()),
+            NotShadowCaster,
+            NotShadowReceiver,
+            Transform::from_xyz(-0.22, 0.78, tail_end_z + 0.08)
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+            ChildOf(helicopter_entity),
+        ))
+        .id();
+
+    commands.spawn((
+        Mesh3d(tail_blade_a_mesh),
+        MeshMaterial3d(dark_metal_mat.clone()),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::IDENTITY,
+        ChildOf(tail_rotor_entity),
+    ));
+    commands.spawn((
+        Mesh3d(tail_blade_b_mesh),
+        MeshMaterial3d(dark_metal_mat),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::IDENTITY,
+        ChildOf(tail_rotor_entity),
+    ));
+
+    (helicopter_entity, main_rotor_entity, tail_rotor_entity)
+}
+
+/// Spawns the friendly APC and friendly Attack Helicopter in `test_level_4`.
 pub fn setup_level_vehicles(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -455,6 +996,571 @@ pub fn setup_level_vehicles(
         LEVEL_4_FRIENDLY_APC_SPAWN_POS,
         LEVEL_4_FRIENDLY_APC_FACING,
     );
+
+    spawn_attack_helicopter(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Team::Player,
+        LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS,
+        LEVEL_4_FRIENDLY_HELICOPTER_FACING,
+    );
+}
+
+/// Updates every `AttackHelicopter`:
+/// 1. Rapidly spins the top main rotor and rear tail rotor.
+/// 2. Executes 2D directional flight movement (forward, backward, and side-to-side strafing) with
+///    the realistic speed hierarchy: `forward` (fastest) > `strafe` (intermediate) > `backward` (slowest).
+/// 3. Rotates the chin autocannon within its limited forward arc (`±cannon_max_yaw_rad`) to track and
+///    fire at enemies in view.
+pub fn update_attack_helicopters(
+    mut commands: Commands,
+    time: Res<Time>,
+    current_level: Option<Res<CurrentLevel>>,
+    helicopter_order: Option<Res<HelicopterOrder>>,
+    bullet_assets: Option<Res<BulletAssets>>,
+    mut gunshot_writer: MessageWriter<GunshotEvent>,
+    mut helicopter_query: Query<
+        (&Team, &mut AttackHelicopter, &mut Transform),
+        (
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut main_rotor_query: Query<
+        (&HelicopterMainRotor, &mut Transform),
+        (
+            Without<AttackHelicopter>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut tail_rotor_query: Query<
+        (&HelicopterTailRotor, &mut Transform),
+        (
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut cannon_query: Query<
+        (&HelicopterAutocannon, &mut Transform),
+        (
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    soldiers_q: Query<
+        (&Transform, &Team),
+        (
+            With<Soldier>,
+            Without<MountedInVehicle>,
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    buildings_q: Query<
+        (&Transform, &BuildingCollider),
+        (
+            With<Building>,
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<LowWall>,
+        ),
+    >,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+
+    let level = current_level.as_deref().copied().unwrap_or_default();
+    let world_bound = if level == CurrentLevel::Level4 {
+        RTS_SOLDIER_WORLD_BOUND
+    } else {
+        SOLDIER_WORLD_BOUND
+    };
+    let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
+
+    for (v_team, mut heli, mut heli_tf) in &mut helicopter_query {
+        // 1. Spin main and tail rotors
+        heli.main_rotor_angle =
+            (heli.main_rotor_angle + heli.main_rotor_spin_rate_rad * dt) % std::f32::consts::TAU;
+        heli.tail_rotor_angle =
+            (heli.tail_rotor_angle + heli.tail_rotor_spin_rate_rad * dt) % std::f32::consts::TAU;
+
+        // Sync player helicopter order from HelicopterOrder resource if present
+        if *v_team == Team::Player {
+            if let Some(ref h_order) = helicopter_order {
+                match h_order.0 {
+                    CommanderOrder::TakePosition(target_pos) => {
+                        heli.order = VehicleOrder::MoveTo(target_pos);
+                    }
+                    CommanderOrder::Hold => {
+                        if !h_order.is_changed() {
+                            // Keep direct programmatic `heli.order` unless HelicopterOrder was explicitly changed to Hold
+                        } else {
+                            heli.order = VehicleOrder::Hold;
+                        }
+                    }
+                }
+            }
+        }
+
+        let current_pos = Vec2::new(heli_tf.translation.x, heli_tf.translation.z);
+        let current_cannon_pos = heli.cannon_world_pos(current_pos);
+
+        // Pre-scan opposing soldiers so that when the helicopter is holding a position and
+        // enemies are detected, it can rotate (and, if blocked by a building's blind spot,
+        // nudge laterally/longitudinally) to get into firing position.
+        let mut closest_los_enemy: Option<(Vec2, f32)> = None;
+        let mut closest_occluded_enemy: Option<(Vec2, f32)> = None;
+        for (s_tf, s_team) in &soldiers_q {
+            if *s_team == *v_team {
+                continue;
+            }
+            let enemy_pos = Vec2::new(s_tf.translation.x, s_tf.translation.z);
+            let to_enemy = enemy_pos - current_cannon_pos;
+            let dist_sq = to_enemy.length_squared();
+            if dist_sq < 0.25 {
+                continue;
+            }
+            let max_detect_range = heli.cannon_vision_range * 1.25;
+            if dist_sq > max_detect_range * max_detect_range {
+                continue;
+            }
+            let dir_to_enemy = to_enemy.normalize_or_zero();
+            let in_cannon_range =
+                dist_sq <= heli.cannon_vision_range * heli.cannon_vision_range;
+            if in_cannon_range
+                && can_see_target_aerial(
+                    current_cannon_pos,
+                    dir_to_enemy,
+                    enemy_pos,
+                    heli.cannon_vision_range,
+                    std::f32::consts::PI,
+                    3.0,
+                    &buildings,
+                )
+            {
+                if closest_los_enemy.is_none_or(|(_, best_d2)| dist_sq < best_d2) {
+                    closest_los_enemy = Some((enemy_pos, dist_sq));
+                }
+            } else if closest_occluded_enemy.is_none_or(|(_, best_d2)| dist_sq < best_d2) {
+                closest_occluded_enemy = Some((enemy_pos, dist_sq));
+            }
+        }
+
+        // Helper to rotate `heli.heading` toward a world-space target point
+        let rotate_heading_toward = |heli: &mut AttackHelicopter, target_pt: Vec2| {
+            let to_pt = target_pt - current_pos;
+            if to_pt.length_squared() > 0.25 && !heli.maintain_heading {
+                let desired_dir = to_pt.normalize();
+                let cur_fwd = heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+                let current_yaw = f32::atan2(-cur_fwd.x, -cur_fwd.y);
+                let target_yaw = f32::atan2(-desired_dir.x, -desired_dir.y);
+                let mut yaw_diff = target_yaw - current_yaw;
+                while yaw_diff > std::f32::consts::PI {
+                    yaw_diff -= std::f32::consts::TAU;
+                }
+                while yaw_diff < -std::f32::consts::PI {
+                    yaw_diff += std::f32::consts::TAU;
+                }
+                let max_yaw_step = heli.yaw_rate_rad * dt;
+                let new_yaw = if yaw_diff.abs() <= max_yaw_step {
+                    target_yaw
+                } else {
+                    current_yaw + yaw_diff.signum() * max_yaw_step
+                };
+                heli.heading = Vec2::new(-new_yaw.sin(), -new_yaw.cos())
+                    .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+            }
+        };
+
+        // 2. Directional flight kinematics: forward (fastest), strafe (intermediate), backward (slowest)
+        match heli.order {
+            VehicleOrder::MoveTo(target_pos) => {
+                let to_target = target_pos - current_pos;
+                let dist = to_target.length();
+                if dist <= 1.5 {
+                    // Arrived at target hover point: brake speeds to zero and rotate toward any detected enemy
+                    if let Some((enemy_pos, _)) = closest_los_enemy.or(closest_occluded_enemy) {
+                        rotate_heading_toward(&mut heli, enemy_pos);
+                    }
+                    let decel_step = heli.deceleration * dt;
+                    if heli.forward_speed.abs() <= decel_step {
+                        heli.forward_speed = 0.0;
+                    } else {
+                        heli.forward_speed -= heli.forward_speed.signum() * decel_step;
+                    }
+                    if heli.strafe_speed.abs() <= decel_step {
+                        heli.strafe_speed = 0.0;
+                    } else {
+                        heli.strafe_speed -= heli.strafe_speed.signum() * decel_step;
+                    }
+                } else {
+                    let desired_dir_world = to_target / dist;
+
+                    // When traveling long distance (and heading is not explicitly locked),
+                    // turn the helicopter's nose toward the direction of movement and fly forward nose-first
+                    // rather than sliding diagonally across the map.
+                    let (desired_forward_speed, desired_strafe_speed) =
+                        if dist > HELICOPTER_LONG_TRANSIT_DIST && !heli.maintain_heading {
+                            rotate_heading_toward(&mut heli, target_pos);
+                            let updated_forward = heli.heading;
+                            let alignment = desired_dir_world.dot(updated_forward).max(0.0);
+                            let arrival_speed =
+                                ((2.0 * heli.deceleration * (dist - 0.6).max(0.0)).sqrt())
+                                    .min(heli.max_forward_speed);
+                            (
+                                (arrival_speed * alignment * alignment)
+                                    .clamp(0.0, heli.max_forward_speed),
+                                0.0,
+                            )
+                        } else {
+                            // Short-range tactical adjustment or locked heading: translate via forward/backward/strafe
+                            if !heli.maintain_heading {
+                                if let Some((enemy_pos, _)) =
+                                    closest_los_enemy.or(closest_occluded_enemy)
+                                {
+                                    rotate_heading_toward(&mut heli, enemy_pos);
+                                }
+                            }
+                            let updated_fwd =
+                                heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+                            let updated_right = heli.right_dir();
+                            let local_forward = desired_dir_world.dot(updated_fwd);
+                            let local_right = desired_dir_world.dot(updated_right);
+                            let max_dir_speed =
+                                heli.max_speed_for_local_dir(local_forward, local_right);
+                            let arrival_speed =
+                                ((2.0 * heli.deceleration * (dist - 0.6).max(0.0)).sqrt())
+                                    .min(max_dir_speed);
+                            (
+                                (local_forward * arrival_speed)
+                                    .clamp(-heli.max_backward_speed, heli.max_forward_speed),
+                                (local_right * arrival_speed)
+                                    .clamp(-heli.max_strafe_speed, heli.max_strafe_speed),
+                            )
+                        };
+
+                    let forward_diff = desired_forward_speed - heli.forward_speed;
+                    let forward_rate = if forward_diff.abs() > 0.01
+                        && desired_forward_speed.abs() >= heli.forward_speed.abs()
+                    {
+                        heli.acceleration
+                    } else {
+                        heli.deceleration
+                    };
+                    let max_f_step = forward_rate * dt;
+                    if forward_diff.abs() <= max_f_step {
+                        heli.forward_speed = desired_forward_speed;
+                    } else {
+                        heli.forward_speed += forward_diff.signum() * max_f_step;
+                    }
+
+                    let strafe_diff = desired_strafe_speed - heli.strafe_speed;
+                    let strafe_rate = if strafe_diff.abs() > 0.01
+                        && desired_strafe_speed.abs() >= heli.strafe_speed.abs()
+                    {
+                        heli.acceleration
+                    } else {
+                        heli.deceleration
+                    };
+                    let max_s_step = strafe_rate * dt;
+                    if strafe_diff.abs() <= max_s_step {
+                        heli.strafe_speed = desired_strafe_speed;
+                    } else {
+                        heli.strafe_speed += strafe_diff.signum() * max_s_step;
+                    }
+                }
+            }
+            VehicleOrder::Hold | VehicleOrder::DismountCrew | VehicleOrder::MountCrew => {
+                // While holding position, if enemies are detected:
+                // 1. Rotate the helicopter's nose toward the detected enemy to bring the limited-arc
+                //    chin autocannon into firing position.
+                // 2. If no enemy currently has clear LOS because a building's shadow is obstructing
+                //    the shot (or the enemy is just outside range), reposition laterally/forward
+                //    into a clear firing position.
+                let mut reposition_vel_local: Option<(f32, f32)> = None;
+                if let Some((enemy_pos, _)) = closest_los_enemy {
+                    rotate_heading_toward(&mut heli, enemy_pos);
+                } else if let Some((enemy_pos, _)) = closest_occluded_enemy {
+                    rotate_heading_toward(&mut heli, enemy_pos);
+                    if !heli.maintain_heading {
+                        let cur_fwd =
+                            heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+                        let cur_right = heli.right_dir();
+                        let candidates = [
+                            cur_right * -1.0,
+                            cur_right,
+                            cur_fwd,
+                            cur_fwd * -1.0,
+                        ];
+                        'probe: for step_dist in [4.5_f32, 9.0, 14.0] {
+                            for dir_cand in candidates {
+                                let probe_heli_pos = current_pos + dir_cand * step_dist;
+                                let probe_cannon_pos = heli.cannon_world_pos(probe_heli_pos);
+                                let to_e = enemy_pos - probe_cannon_pos;
+                                if to_e.length_squared()
+                                    <= heli.cannon_vision_range * heli.cannon_vision_range
+                                    && can_see_target_aerial(
+                                        probe_cannon_pos,
+                                        to_e.normalize_or_zero(),
+                                        enemy_pos,
+                                        heli.cannon_vision_range,
+                                        std::f32::consts::PI,
+                                        3.0,
+                                        &buildings,
+                                    )
+                                {
+                                    let f_comp = dir_cand.dot(cur_fwd) * 6.5;
+                                    let s_comp = dir_cand.dot(cur_right) * 6.5;
+                                    reposition_vel_local = Some((f_comp, s_comp));
+                                    break 'probe;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some((desired_f, desired_s)) = reposition_vel_local {
+                    let f_diff = desired_f - heli.forward_speed;
+                    let max_f = heli.acceleration * dt;
+                    if f_diff.abs() <= max_f {
+                        heli.forward_speed = desired_f;
+                    } else {
+                        heli.forward_speed += f_diff.signum() * max_f;
+                    }
+                    let s_diff = desired_s - heli.strafe_speed;
+                    let max_s = heli.acceleration * dt;
+                    if s_diff.abs() <= max_s {
+                        heli.strafe_speed = desired_s;
+                    } else {
+                        heli.strafe_speed += s_diff.signum() * max_s;
+                    }
+                } else {
+                    let decel_step = heli.deceleration * dt;
+                    if heli.forward_speed.abs() <= decel_step {
+                        heli.forward_speed = 0.0;
+                    } else {
+                        heli.forward_speed -= heli.forward_speed.signum() * decel_step;
+                    }
+                    if heli.strafe_speed.abs() <= decel_step {
+                        heli.strafe_speed = 0.0;
+                    } else {
+                        heli.strafe_speed -= heli.strafe_speed.signum() * decel_step;
+                    }
+                }
+            }
+        }
+
+        // Enforce strict directional speed bounds
+        heli.forward_speed = heli
+            .forward_speed
+            .clamp(-heli.max_backward_speed, heli.max_forward_speed);
+        heli.strafe_speed = heli
+            .strafe_speed
+            .clamp(-heli.max_strafe_speed, heli.max_strafe_speed);
+
+        let vel_2d = heli.velocity_2d();
+        let next_pos = (current_pos + vel_2d * dt).clamp(
+            Vec2::splat(-world_bound),
+            Vec2::splat(world_bound),
+        );
+        heli_tf.translation.x = next_pos.x;
+        heli_tf.translation.y = heli.hover_altitude;
+        heli_tf.translation.z = next_pos.y;
+
+        // Subtle aerodynamic pitch (forward/backward) and roll (strafing)
+        let active_forward = heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let fuselage_yaw = f32::atan2(-active_forward.x, -active_forward.y);
+        let pitch = -(heli.forward_speed / heli.max_forward_speed.max(1.0)) * 0.12;
+        let roll = -(heli.strafe_speed / heli.max_strafe_speed.max(1.0)) * 0.14;
+        heli_tf.rotation = Quat::from_rotation_y(fuselage_yaw)
+            * Quat::from_rotation_x(pitch)
+            * Quat::from_rotation_z(roll);
+
+        // 3. Limited-arc chin autocannon target acquisition, slewing, and firing
+        //    All target angles and bullet origins are measured from the nose-mounted chin autocannon
+        //    (`cannon_mount_pos` / `cannon_muzzle_world_pos`) rather than the center of the helicopter.
+        heli.cannon_shoot_timer.tick(time.delta());
+        let cannon_mount_pos = heli.cannon_world_pos(next_pos);
+        let mut best_in_arc_enemy: Option<(Vec2, f32, f32)> = None;
+        let mut best_out_of_arc_enemy: Option<(f32, f32)> = None;
+
+        for (s_tf, s_team) in &soldiers_q {
+            if *s_team == *v_team {
+                continue;
+            }
+            let enemy_pos = Vec2::new(s_tf.translation.x, s_tf.translation.z);
+            let to_enemy = enemy_pos - cannon_mount_pos;
+            let dist_sq = to_enemy.length_squared();
+            if dist_sq > heli.cannon_vision_range * heli.cannon_vision_range || dist_sq < 0.25 {
+                continue;
+            }
+            let dir_to_enemy = to_enemy.normalize_or_zero();
+            if !can_see_target_aerial(
+                cannon_mount_pos,
+                dir_to_enemy,
+                enemy_pos,
+                heli.cannon_vision_range,
+                std::f32::consts::PI,
+                3.0,
+                &buildings,
+            ) {
+                continue;
+            }
+
+            let target_world_yaw = f32::atan2(-dir_to_enemy.x, -dir_to_enemy.y);
+            let mut desired_local_yaw = target_world_yaw - fuselage_yaw;
+            while desired_local_yaw > std::f32::consts::PI {
+                desired_local_yaw -= std::f32::consts::TAU;
+            }
+            while desired_local_yaw < -std::f32::consts::PI {
+                desired_local_yaw += std::f32::consts::TAU;
+            }
+
+            if desired_local_yaw.abs() <= heli.cannon_max_yaw_rad {
+                if best_in_arc_enemy.is_none_or(|(_, _, best_d2)| dist_sq < best_d2) {
+                    best_in_arc_enemy = Some((enemy_pos, desired_local_yaw, dist_sq));
+                }
+            } else if best_out_of_arc_enemy.is_none_or(|(_, best_d2)| dist_sq < best_d2) {
+                best_out_of_arc_enemy = Some((desired_local_yaw, dist_sq));
+            }
+        }
+
+        let target_local_yaw = if let Some((_, in_arc_yaw, _)) = best_in_arc_enemy {
+            in_arc_yaw
+        } else if let Some((out_yaw, _)) = best_out_of_arc_enemy {
+            // Slew up to the mechanical arc limit toward an out-of-arc enemy, but cannot rotate past it
+            out_yaw.clamp(-heli.cannon_max_yaw_rad, heli.cannon_max_yaw_rad)
+        } else {
+            0.0
+        };
+
+        let clamped_target_yaw =
+            target_local_yaw.clamp(-heli.cannon_max_yaw_rad, heli.cannon_max_yaw_rad);
+        let yaw_diff = clamped_target_yaw - heli.cannon_yaw_local;
+        let max_slew_step = heli.cannon_slew_rate_rad * dt;
+        if yaw_diff.abs() <= max_slew_step {
+            heli.cannon_yaw_local = clamped_target_yaw;
+        } else {
+            heli.cannon_yaw_local += yaw_diff.signum() * max_slew_step;
+        }
+        heli.cannon_yaw_local = heli
+            .cannon_yaw_local
+            .clamp(-heli.cannon_max_yaw_rad, heli.cannon_max_yaw_rad);
+
+        // Fire at visible enemy inside the limited arc once the chin autocannon is aligned
+        if let Some((enemy_pos, desired_local_yaw, _)) = best_in_arc_enemy {
+            let aim_error = (desired_local_yaw - heli.cannon_yaw_local).abs();
+            if aim_error <= 0.18 && heli.cannon_shoot_timer.is_finished() {
+                heli.cannon_shoot_timer.reset();
+                let cannon_dir = heli.cannon_world_dir();
+                let muzzle_pos = heli.cannon_muzzle_world_pos(next_pos);
+                let shot_dir = (enemy_pos - muzzle_pos).normalize_or(cannon_dir);
+                let bullet_speed = 52.0;
+                let target_dist = (enemy_pos - muzzle_pos).length();
+                let bullet_lifetime = ((target_dist + 2.2) / bullet_speed).clamp(0.25, 1.5);
+
+                if let Some(ref assets) = bullet_assets {
+                    let mat = match *v_team {
+                        Team::Player => assets.player_material.clone(),
+                        Team::Enemy => assets.enemy_material.clone(),
+                    };
+                    commands.spawn((
+                        LevelEntity,
+                        Mesh3d(assets.mesh.clone()),
+                        MeshMaterial3d(mat),
+                        Transform::from_xyz(
+                            muzzle_pos.x,
+                            heli.hover_altitude - 0.36,
+                            muzzle_pos.y,
+                        )
+                        .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                        Bullet {
+                            origin: muzzle_pos,
+                            direction: shot_dir,
+                            speed: bullet_speed,
+                            lifetime: bullet_lifetime,
+                            team: *v_team,
+                            shooter_stance: Stance::Standing,
+                            missed_entities: Vec::new(),
+                        },
+                    ));
+                }
+
+                gunshot_writer.write(GunshotEvent {
+                    position: muzzle_pos,
+                    shooter_team: *v_team,
+                });
+            }
+        }
+    }
+
+    for (main_rotor, mut rotor_tf) in &mut main_rotor_query {
+        if let Ok((_, heli, _)) = helicopter_query.get(main_rotor.helicopter) {
+            rotor_tf.rotation = Quat::from_rotation_y(heli.main_rotor_angle);
+        }
+    }
+
+    for (tail_rotor, mut tail_tf) in &mut tail_rotor_query {
+        if let Ok((_, heli, _)) = helicopter_query.get(tail_rotor.helicopter) {
+            tail_tf.rotation =
+                Quat::from_rotation_x(heli.tail_rotor_angle) * Quat::from_rotation_z(FRAC_PI_2);
+        }
+    }
+
+    for (cannon, mut cannon_tf) in &mut cannon_query {
+        if let Ok((_, heli, _)) = helicopter_query.get(cannon.helicopter) {
+            // Counter-rotate the fuselage's aerodynamic pitch/roll so the gyro-stabilized chin
+            // turret and its ground-projected sight cone remain level with the terrain plane.
+            let pitch = -(heli.forward_speed / heli.max_forward_speed.max(1.0)) * 0.12;
+            let roll = -(heli.strafe_speed / heli.max_strafe_speed.max(1.0)) * 0.14;
+            let local_tilt = Quat::from_rotation_x(pitch) * Quat::from_rotation_z(roll);
+            cannon_tf.rotation =
+                local_tilt.inverse() * Quat::from_rotation_y(heli.cannon_yaw_local);
+        }
+    }
 }
 
 /// Dismounts all crew and passengers currently inside `vehicle_entity`, placing them outside their
@@ -1398,6 +2504,7 @@ mod tests {
                 update_crewed_apc_vehicles,
                 update_dismounted_crew_return,
                 resolve_soldier_apc_collisions,
+                update_attack_helicopters,
             )
                 .chain(),
         );
@@ -1858,6 +2965,361 @@ mod tests {
             apc_tf.translation.z < 30.0,
             "APC should drive directly through the killed soldier without stopping, z={}",
             apc_tf.translation.z
+        );
+    }
+
+    #[test]
+    fn test_level_4_spawns_friendly_attack_helicopter_and_spins_rotors() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let (heli_entity, heli_tf, heli_team, initial_heli) = {
+            let mut q = app
+                .world_mut()
+                .query::<(Entity, &Transform, &Team, &AttackHelicopter)>();
+            let (e, tf, team, h) = q.single(app.world()).unwrap();
+            (e, *tf, *team, h.clone())
+        };
+
+        assert_eq!(heli_team, Team::Player);
+        assert!(
+            (initial_heli.heading - LEVEL_4_FRIENDLY_HELICOPTER_FACING).length() < 0.01
+                && (initial_heli.hover_altitude - HELICOPTER_HOVER_ALTITUDE).abs() < 0.01
+        );
+        assert!(
+            (heli_tf.translation.x - LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS.x).abs() < 0.01
+                && (heli_tf.translation.z - LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS.y).abs() < 0.01,
+            "Attack helicopter should spawn at LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS"
+        );
+        assert!(
+            (heli_tf.translation.y - HELICOPTER_HOVER_ALTITUDE).abs() < 0.01,
+            "Attack helicopter should hover at HELICOPTER_HOVER_ALTITUDE"
+        );
+
+        let initial_main_rotor_rot = app
+            .world_mut()
+            .query_filtered::<&Transform, With<HelicopterMainRotor>>()
+            .single(app.world())
+            .unwrap()
+            .rotation;
+        let initial_tail_rotor_rot = app
+            .world_mut()
+            .query_filtered::<&Transform, With<HelicopterTailRotor>>()
+            .single(app.world())
+            .unwrap()
+            .rotation;
+
+        // Advance simulation by 50ms and verify both main and tail rotors spin rapidly
+        {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+        }
+        app.update();
+
+        let updated_heli = app.world().get::<AttackHelicopter>(heli_entity).unwrap();
+        assert!(
+            updated_heli.main_rotor_angle > initial_heli.main_rotor_angle + 1.0,
+            "Main rotor should spin rapidly (expected >1.0 rad in 50ms, got {})",
+            updated_heli.main_rotor_angle
+        );
+        assert!(
+            updated_heli.tail_rotor_angle > initial_heli.tail_rotor_angle + 1.5,
+            "Tail rotor should spin rapidly (expected >1.5 rad in 50ms, got {})",
+            updated_heli.tail_rotor_angle
+        );
+
+        let updated_main_rotor_rot = app
+            .world_mut()
+            .query_filtered::<&Transform, With<HelicopterMainRotor>>()
+            .single(app.world())
+            .unwrap()
+            .rotation;
+        let updated_tail_rotor_rot = app
+            .world_mut()
+            .query_filtered::<&Transform, With<HelicopterTailRotor>>()
+            .single(app.world())
+            .unwrap()
+            .rotation;
+        assert!(
+            initial_main_rotor_rot.angle_between(updated_main_rotor_rot) > 0.5,
+            "Main rotor Transform rotation must update as the blades spin"
+        );
+        assert!(
+            initial_tail_rotor_rot.angle_between(updated_tail_rotor_rot) > 0.5,
+            "Tail rotor Transform rotation must update as the blades spin"
+        );
+    }
+
+    #[test]
+    fn test_helicopter_movement_speed_hierarchy_forward_faster_than_strafe_faster_than_backward() {
+        let measure_flight = |target_offset: Vec2| -> (f32, f32) {
+            let mut app = create_vehicle_test_app();
+            app.add_systems(Startup, setup_level_vehicles);
+            app.update();
+
+            let heli_entity = app
+                .world_mut()
+                .query_filtered::<Entity, With<AttackHelicopter>>()
+                .single(app.world())
+                .unwrap();
+
+            let start_pos = Vec2::new(0.0, 100.0);
+            app.world_mut()
+                .get_mut::<Transform>(heli_entity)
+                .unwrap()
+                .translation = Vec3::new(start_pos.x, HELICOPTER_HOVER_ALTITUDE, start_pos.y);
+            {
+                let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+                heli.heading = Vec2::new(0.0, -1.0); // Facing North (-Z)
+                heli.maintain_heading = true;
+                heli.order = VehicleOrder::MoveTo(start_pos + target_offset);
+            }
+
+            let mut peak_speed = 0.0_f32;
+            for _ in 0..40 {
+                {
+                    let mut time = app.world_mut().resource_mut::<Time>();
+                    time.advance_by(std::time::Duration::from_millis(50));
+                }
+                app.update();
+                let heli = app.world().get::<AttackHelicopter>(heli_entity).unwrap();
+                peak_speed = peak_speed.max(heli.velocity_2d().length());
+            }
+
+            let end_tf = app.world().get::<Transform>(heli_entity).unwrap();
+            let dist_traveled =
+                (Vec2::new(end_tf.translation.x, end_tf.translation.z) - start_pos).length();
+            (dist_traveled, peak_speed)
+        };
+
+        // 1. Forward flight (North along -Z)
+        let (forward_dist, forward_peak_speed) = measure_flight(Vec2::new(0.0, -100.0));
+        // 2. Side-to-side strafe (East along +X)
+        let (strafe_dist, strafe_peak_speed) = measure_flight(Vec2::new(100.0, 0.0));
+        // 3. Backward flight (South along +Z)
+        let (backward_dist, backward_peak_speed) = measure_flight(Vec2::new(0.0, 100.0));
+
+        assert!(
+            backward_dist > 5.0,
+            "Helicopter must be able to fly backward, traveled {}",
+            backward_dist
+        );
+        assert!(
+            strafe_dist > backward_dist + 3.0 && strafe_peak_speed > backward_peak_speed + 3.0,
+            "Strafing (dist={:.2}, peak={:.2}) must be faster than moving backward (dist={:.2}, peak={:.2})",
+            strafe_dist,
+            strafe_peak_speed,
+            backward_dist,
+            backward_peak_speed
+        );
+        assert!(
+            forward_dist > strafe_dist + 5.0 && forward_peak_speed > strafe_peak_speed + 5.0,
+            "Moving forward (dist={:.2}, peak={:.2}) must be faster than strafing (dist={:.2}, peak={:.2})",
+            forward_dist,
+            forward_peak_speed,
+            strafe_dist,
+            strafe_peak_speed
+        );
+    }
+
+    #[test]
+    fn test_helicopter_autocannon_rotates_in_limited_arc_and_fires_at_enemies_in_view() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let heli_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<AttackHelicopter>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .get_mut::<Transform>(heli_entity)
+            .unwrap()
+            .translation = Vec3::new(0.0, HELICOPTER_HOVER_ALTITUDE, 60.0);
+
+        // 1. Spawn an enemy within the chin autocannon's forward arc (~27° off nose at (10.0, 40.0))
+        let front_enemy = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(10.0, 0.05, 40.0),
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        for _ in 0..15 {
+            {
+                let mut time = app.world_mut().resource_mut::<Time>();
+                time.advance_by(std::time::Duration::from_millis(50));
+            }
+            app.update();
+        }
+
+        let bullets_at_front_enemy: Vec<Vec2> = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .map(|b| b.origin)
+            .collect();
+        assert!(
+            !bullets_at_front_enemy.is_empty(),
+            "Helicopter chin autocannon should rotate toward and fire at enemy in its forward arc"
+        );
+        let heli_center = Vec2::new(0.0, 60.0);
+        for origin in &bullets_at_front_enemy {
+            let dist_from_center = (*origin - heli_center).length();
+            assert!(
+                dist_from_center > HELICOPTER_CANNON_MOUNT_FORWARD,
+                "Bullets must originate from the nose-mounted autocannon muzzle (>{:.2}m from center), got origin {:?} (dist={:.2}m)",
+                HELICOPTER_CANNON_MOUNT_FORWARD,
+                origin,
+                dist_from_center
+            );
+        }
+
+        // Despawn the front enemy and existing bullets, then spawn an enemy BEHIND the helicopter
+        // at (12.0, 80.0) (~149° off the nose, well outside the ±70° limited arc)
+        app.world_mut().despawn(front_enemy);
+        let existing_bullets: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<Bullet>>()
+            .iter(app.world())
+            .collect();
+        for b in existing_bullets {
+            app.world_mut().despawn(b);
+        }
+
+        // Lock heading first to verify the autocannon's mechanical ±70° stop in isolation
+        {
+            let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+            heli.heading = Vec2::new(0.0, -1.0);
+            heli.maintain_heading = true;
+        }
+
+        app.world_mut().spawn((
+            Transform::from_xyz(12.0, 0.05, 80.0),
+            Team::Enemy,
+            Soldier {
+                facing_dir: Vec2::new(0.0, -1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        for _ in 0..20 {
+            {
+                let mut time = app.world_mut().resource_mut::<Time>();
+                time.advance_by(std::time::Duration::from_millis(50));
+            }
+            app.update();
+        }
+
+        let heli = app.world().get::<AttackHelicopter>(heli_entity).unwrap();
+        assert!(
+            heli.cannon_yaw_local.abs() <= heli.cannon_max_yaw_rad + 1e-4,
+            "Autocannon yaw ({:.3} rad) must be strictly clamped to its limited arc (±{:.3} rad)",
+            heli.cannon_yaw_local,
+            heli.cannon_max_yaw_rad
+        );
+        let bullets_at_rear_enemy = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            bullets_at_rear_enemy, 0,
+            "Helicopter chin autocannon must not fire at enemies behind its limited forward arc while heading is locked"
+        );
+
+        // Now unlock heading (`maintain_heading = false`) while holding position: the helicopter
+        // should rotate itself toward the detected enemy at (12.0, 80.0) to get in firing position and open fire!
+        {
+            let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+            heli.maintain_heading = false;
+        }
+        for _ in 0..30 {
+            {
+                let mut time = app.world_mut().resource_mut::<Time>();
+                time.advance_by(std::time::Duration::from_millis(50));
+            }
+            app.update();
+        }
+
+        let rotated_heli = app.world().get::<AttackHelicopter>(heli_entity).unwrap();
+        let expected_dir = (Vec2::new(12.0, 80.0) - heli_center).normalize();
+        assert!(
+            rotated_heli.heading.dot(expected_dir) > 0.90,
+            "While holding position, helicopter should rotate its heading ({:?}) toward detected enemy ({:?})",
+            rotated_heli.heading,
+            expected_dir
+        );
+        let bullets_after_reposition = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .count();
+        assert!(
+            bullets_after_reposition > 0,
+            "Helicopter should fire once it has rotated into firing position while holding"
+        );
+    }
+
+    #[test]
+    fn test_helicopter_turns_nose_toward_movement_direction_on_long_distance_order() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let heli_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<AttackHelicopter>>()
+            .single(app.world())
+            .unwrap();
+
+        let start_pos = Vec2::new(0.0, 120.0);
+        let target_pos = Vec2::new(70.0, 50.0); // Northeast at a 45° diagonal, ~99m away
+        app.world_mut()
+            .get_mut::<Transform>(heli_entity)
+            .unwrap()
+            .translation = Vec3::new(start_pos.x, HELICOPTER_HOVER_ALTITUDE, start_pos.y);
+        {
+            let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+            heli.heading = Vec2::new(0.0, -1.0); // Initially facing due North
+            heli.order = VehicleOrder::MoveTo(target_pos);
+        }
+
+        for _ in 0..25 {
+            {
+                let mut time = app.world_mut().resource_mut::<Time>();
+                time.advance_by(std::time::Duration::from_millis(50));
+            }
+            app.update();
+        }
+
+        let heli = app.world().get::<AttackHelicopter>(heli_entity).unwrap();
+        let heli_tf = app.world().get::<Transform>(heli_entity).unwrap();
+        let current_pos = Vec2::new(heli_tf.translation.x, heli_tf.translation.z);
+        let desired_dir = (target_pos - current_pos).normalize();
+
+        assert!(
+            heli.heading.dot(desired_dir) > 0.98,
+            "Helicopter nose heading ({:?}) should rotate to point directly along long-distance travel direction ({:?})",
+            heli.heading,
+            desired_dir
+        );
+        assert!(
+            heli.strafe_speed.abs() < 0.5 && heli.forward_speed > 10.0,
+            "Helicopter should fly forward nose-first (forward_speed={:.2}) without diagonal strafing (strafe_speed={:.2})",
+            heli.forward_speed,
+            heli.strafe_speed
         );
     }
 }

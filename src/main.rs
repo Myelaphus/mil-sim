@@ -37,6 +37,7 @@ fn main() {
         .init_resource::<common::types::CommanderOrder>()
         .init_resource::<common::types::CommandGroup>()
         .init_resource::<common::types::ApcOrder>()
+        .init_resource::<common::types::HelicopterOrder>()
         .init_resource::<common::types::FogOfWarEnabled>()
         .init_resource::<friendly::SquadDoctrineState>()
         .add_plugins((
@@ -113,6 +114,7 @@ mod tests {
                 vehicle::update_crewed_apc_vehicles,
                 vehicle::update_dismounted_crew_return,
                 vehicle::resolve_soldier_apc_collisions,
+                vehicle::update_attack_helicopters,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
                 resolve_soldier_pairwise_collisions,

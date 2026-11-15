@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
-use crate::common::types::{FogOfWarEnabled, Soldier};
+use crate::common::types::{FogOfWarEnabled, Soldier, Team};
 use crate::friendly::Friendly;
 use crate::player::Player;
+use crate::vehicle::AttackHelicopter;
 
 #[derive(Component)]
 pub struct FogOverlay;
@@ -49,8 +50,9 @@ impl Material for FogMaterial {
 // Synchronizes Fog of War shader uniforms and visibility with player / friendly spotters and debug toggle
 pub fn sync_fog_uniforms(
     fog_enabled: Option<Res<FogOfWarEnabled>>,
-    player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Friendly>)>,
-    friendly_q: Query<(&Transform, &Soldier), (With<Friendly>, Without<Player>)>,
+    player_q: Query<(&Transform, &Soldier), (With<Player>, Without<Friendly>, Without<AttackHelicopter>)>,
+    friendly_q: Query<(&Transform, &Soldier), (With<Friendly>, Without<Player>, Without<AttackHelicopter>)>,
+    heli_q: Query<(&Transform, &Team, &AttackHelicopter), (Without<Player>, Without<Friendly>)>,
     mut fog_q: Query<(&MeshMaterial3d<FogMaterial>, &mut Visibility), With<FogOverlay>>,
     mut fog_materials: ResMut<Assets<FogMaterial>>,
 ) {
@@ -76,9 +78,26 @@ pub fn sync_fog_uniforms(
             }
         }
     } else {
-        // RTS mode (Level 4): populate spotters from all living friendly squad members
+        // RTS mode (Level 4): populate spotters from all living friendly squad members and attack helicopters
         let mut spotter_buf = [Vec4::ZERO; 16];
         let mut count = 0usize;
+        for (h_tf, team, heli) in &heli_q {
+            if *team == Team::Player && count < 16 {
+                // Scale the normalized direction vector by 2.0 (`length(s_dir) == 2.0`) so `fog.wgsl`
+                // recognizes this spotter as an elevated aerial unit (`is_aerial = length(s_dir) > 1.5`)
+                // with a 38m vision range, 35° half-angle, and limited-depth building shadow occlusion.
+                let heli_pos = Vec2::new(h_tf.translation.x, h_tf.translation.z);
+                let cannon_pos = heli.cannon_world_pos(heli_pos);
+                let cannon_dir = heli.cannon_world_dir().normalize_or_zero() * 2.0;
+                spotter_buf[count] = Vec4::new(
+                    cannon_pos.x,
+                    cannon_pos.y,
+                    cannon_dir.x,
+                    cannon_dir.y,
+                );
+                count += 1;
+            }
+        }
         for (f_tf, f_soldier) in &friendly_q {
             if count < 16 {
                 spotter_buf[count] = Vec4::new(

@@ -75,21 +75,98 @@ fn ray_intersects_box(origin: vec2<f32>, p_target: vec2<f32>, b: vec4<f32>) -> b
     return tmin < 0.999 && tmax > 0.001;
 }
 
+// Aerial line-of-sight vs building AABB (b = vec4(min_x, min_z, max_x, max_z)).
+// Because the helicopter hovers well above building roofs:
+// 1. A building directly underneath the helicopter (`origin` inside `b`) does not obstruct its sight cone.
+// 2. Other buildings only cast a finite shadow (`shadow_depth`) directly behind their far wall,
+//    leaving the area beyond that shadow visible.
+fn ray_intersects_box_aerial(origin: vec2<f32>, p_target: vec2<f32>, b: vec4<f32>) -> bool {
+    // If target point is on/inside this building footprint, it does not occlude itself
+    if (p_target.x >= b.x && p_target.x <= b.z && p_target.y >= b.y && p_target.y <= b.w) {
+        return false;
+    }
+
+    // If the aerial spotter is directly over this building's roof, this building does not block its cone
+    if (origin.x >= b.x && origin.x <= b.z && origin.y >= b.y && origin.y <= b.w) {
+        return false;
+    }
+
+    let delta = p_target - origin;
+    var tmin = 0.0;
+    var tmax = 1.0;
+
+    // X-axis slab
+    if (abs(delta.x) > 0.0001) {
+        let inv_dx = 1.0 / delta.x;
+        var t1 = (b.x - origin.x) * inv_dx;
+        var t2 = (b.z - origin.x) * inv_dx;
+        if (t1 > t2) {
+            let tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        tmin = max(tmin, t1);
+        tmax = min(tmax, t2);
+        if (tmin > tmax) {
+            return false;
+        }
+    } else {
+        if (origin.x < b.x || origin.x > b.z) {
+            return false;
+        }
+    }
+
+    // Y-axis (world Z) slab
+    if (abs(delta.y) > 0.0001) {
+        let inv_dy = 1.0 / delta.y;
+        var t1 = (b.y - origin.y) * inv_dy;
+        var t2 = (b.w - origin.y) * inv_dy;
+        if (t1 > t2) {
+            let tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        tmin = max(tmin, t1);
+        tmax = min(tmax, t2);
+        if (tmin > tmax) {
+            return false;
+        }
+    } else {
+        if (origin.y < b.y || origin.y > b.w) {
+            return false;
+        }
+    }
+
+    if (tmin < 0.999 && tmax > 0.001) {
+        let total_dist = length(delta);
+        let exit_dist = tmax * total_dist;
+        let dist_behind_building = (1.0 - tmax) * total_dist;
+        let shadow_depth = clamp(exit_dist * 0.45, 4.0, 9.5);
+        return dist_behind_building <= shadow_depth;
+    }
+
+    return false;
+}
+
 fn compute_spotter_visibility(world_xz: vec2<f32>, s_pos: vec2<f32>, s_dir: vec2<f32>) -> f32 {
+    let is_aerial = length(s_dir) > 1.5;
+    let spotter_range = select(material.vision_range, 38.0, is_aerial);
+    let spotter_angle = select(material.vision_angle, 0.6108652, is_aerial);
+
     let to_frag = world_xz - s_pos;
     let dist = length(to_frag);
 
-    // 1. Close-range 360° awareness circle around the soldier
+    // 1. Close-range 360° awareness circle around the unit
     let inner_visibility = 1.0 - smoothstep(material.inner_radius - 0.6, material.inner_radius, dist);
 
     // 2. Max vision range cutoff
-    let range_fade = smoothstep(material.vision_range - 2.0, material.vision_range, dist);
+    let range_fade = smoothstep(spotter_range - 2.0, spotter_range, dist);
 
     // 3. Directional vision cone calculation
     let safe_dist = max(dist, 0.001);
     let dir = to_frag / safe_dist;
     let dot_prod = dot(dir, normalize(s_dir));
-    let cos_half_angle = cos(material.vision_angle);
+    let cos_half_angle = cos(spotter_angle);
 
     // Anti-aliased smooth edge along the vision cone flanks
     let angle_visibility = smoothstep(cos_half_angle - 0.025, cos_half_angle + 0.025, dot_prod);
@@ -103,7 +180,12 @@ fn compute_spotter_visibility(world_xz: vec2<f32>, s_pos: vec2<f32>, s_dir: vec2
     // 4. Line-of-sight obstruction check against buildings
     if (vis > 0.0) {
         for (var i = 0u; i < material.building_count; i = i + 1u) {
-            if (ray_intersects_box(s_pos, world_xz, material.buildings[i])) {
+            let blocked = select(
+                ray_intersects_box(s_pos, world_xz, material.buildings[i]),
+                ray_intersects_box_aerial(s_pos, world_xz, material.buildings[i]),
+                is_aerial
+            );
+            if (blocked) {
                 vis = 0.0;
                 break;
             }

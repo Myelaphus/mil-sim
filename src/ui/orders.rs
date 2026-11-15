@@ -1,9 +1,9 @@
 use crate::common::types::{
-    ApcOrder, CommandGroup, CommanderOrder, CurrentLevel, FogOfWarEnabled, LevelEntity, OrderType,
-    RTS_SOLDIER_WORLD_BOUND, SelectedOrderTool, Team,
+    ApcOrder, CommandGroup, CommanderOrder, CurrentLevel, FogOfWarEnabled, HelicopterOrder,
+    LevelEntity, OrderType, RTS_SOLDIER_WORLD_BOUND, SelectedOrderTool, Team,
 };
 use crate::friendly::SquadDoctrineState;
-use crate::vehicle::{ApcVehicle, VehicleOrder};
+use crate::vehicle::{ApcVehicle, AttackHelicopter, VehicleOrder};
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
@@ -15,6 +15,9 @@ pub struct InfantryGroupButton;
 
 #[derive(Component)]
 pub struct ApcGroupButton;
+
+#[derive(Component)]
+pub struct HelicopterGroupButton;
 
 #[derive(Component)]
 pub struct TakePositionOrderButton;
@@ -46,6 +49,9 @@ pub struct OrderObjectiveMarker;
 #[derive(Component)]
 pub struct ApcOrderObjectiveMarker;
 
+#[derive(Component)]
+pub struct HelicopterOrderObjectiveMarker;
+
 pub const ORDER_BTN_NORMAL: Color = Color::srgb(0.13, 0.18, 0.24);
 pub const ORDER_BTN_HOVER: Color = Color::srgb(0.22, 0.32, 0.44);
 pub const ORDER_BTN_SELECTED: Color = Color::srgb(0.14, 0.56, 0.42);
@@ -61,6 +67,7 @@ pub fn setup_orders_ui(
     mut selected_group: Option<ResMut<CommandGroup>>,
     mut commander_order: Option<ResMut<CommanderOrder>>,
     mut apc_order: Option<ResMut<ApcOrder>>,
+    mut helicopter_order: Option<ResMut<HelicopterOrder>>,
     mut squad_doctrine: Option<ResMut<SquadDoctrineState>>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
@@ -77,6 +84,9 @@ pub fn setup_orders_ui(
     if let Some(ref mut v_order) = apc_order {
         v_order.0 = CommanderOrder::Hold;
     }
+    if let Some(ref mut h_order) = helicopter_order {
+        h_order.0 = CommanderOrder::Hold;
+    }
     if let Some(ref mut doctrine) = squad_doctrine {
         **doctrine = SquadDoctrineState::default();
     }
@@ -85,7 +95,7 @@ pub fn setup_orders_ui(
         return;
     }
 
-    // Spawn 3D ground markers for active objective positions (Infantry Squad in emerald, APC in amber)
+    // Spawn 3D ground markers for active objective positions (Infantry Squad in emerald, APC in amber, Helicopter in cyan)
     if let (Some(meshes), Some(materials)) = (meshes.as_mut(), materials.as_mut()) {
         let outer_mesh = meshes.add(Circle::new(3.2));
         let inner_mesh = meshes.add(Circle::new(0.8));
@@ -142,7 +152,7 @@ pub fn setup_orders_ui(
             .spawn((
                 LevelEntity,
                 ApcOrderObjectiveMarker,
-                Mesh3d(outer_mesh),
+                Mesh3d(outer_mesh.clone()),
                 MeshMaterial3d(apc_outer_mat),
                 Transform::from_xyz(0.0, 0.022, 0.0)
                     .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
@@ -151,10 +161,44 @@ pub fn setup_orders_ui(
             .id();
 
         commands.spawn((
-            Mesh3d(inner_mesh),
+            Mesh3d(inner_mesh.clone()),
             MeshMaterial3d(apc_inner_mat),
             Transform::from_xyz(0.0, 0.0, 0.002),
             ChildOf(apc_marker),
+        ));
+
+        let heli_outer_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.22, 0.78, 0.98, 0.32),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+        let heli_inner_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.45, 0.90, 1.0, 0.88),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+
+        let heli_marker = commands
+            .spawn((
+                LevelEntity,
+                HelicopterOrderObjectiveMarker,
+                Mesh3d(outer_mesh),
+                MeshMaterial3d(heli_outer_mat),
+                Transform::from_xyz(0.0, 0.024, 0.0)
+                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                Visibility::Hidden,
+            ))
+            .id();
+
+        commands.spawn((
+            Mesh3d(inner_mesh),
+            MeshMaterial3d(heli_inner_mat),
+            Transform::from_xyz(0.0, 0.0, 0.002),
+            ChildOf(heli_marker),
         ));
     }
 
@@ -179,7 +223,7 @@ pub fn setup_orders_ui(
         ))
         .with_children(|root| {
             root.spawn((
-                Text::new("COMMANDER ORDERS  •  SELECT UNIT GROUP ([Q] / [E] / [TAB])"),
+                Text::new("COMMANDER ORDERS  •  SELECT UNIT GROUP ([Q] / [E] / [R] / [TAB])"),
                 TextFont {
                     font_size: FontSize::Px(11.0),
                     ..default()
@@ -187,7 +231,7 @@ pub fn setup_orders_ui(
                 TextColor(Color::srgb(0.55, 0.68, 0.82)),
             ));
 
-            // Unit group selection row (Group 1: Infantry Squad vs Group 2: APC Vehicle)
+            // Unit group selection row (Group 1: Infantry Squad, Group 2: APC Vehicle, Group 3: Attack Helicopter)
             root.spawn(Node {
                 flex_direction: FlexDirection::Row,
                 column_gap: Val::Px(10.0),
@@ -244,6 +288,32 @@ pub fn setup_orders_ui(
                                 ..default()
                             },
                             TextColor(Color::srgb(0.98, 0.92, 0.78)),
+                        ));
+                    });
+
+                group_row
+                    .spawn((
+                        Button,
+                        HelicopterGroupButton,
+                        Node {
+                            padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border: UiRect::all(Val::Px(1.5)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(ORDER_BTN_NORMAL),
+                        BorderColor::all(Color::srgb(0.28, 0.62, 0.76)),
+                    ))
+                    .with_children(|btn| {
+                        btn.spawn((
+                            Text::new("[R] GROUP 3: HELICOPTER"),
+                            TextFont {
+                                font_size: FontSize::Px(12.5),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.84, 0.96, 1.0)),
                         ));
                     });
             });
@@ -381,7 +451,7 @@ pub fn setup_orders_ui(
         });
 }
 
-/// Handles unit group selection (`CommandGroup::InfantrySquad` vs `CommandGroup::Apc`),
+/// Handles unit group selection (`CommandGroup::InfantrySquad`, `CommandGroup::Apc`, `CommandGroup::Helicopter`),
 /// order type selection (via UI buttons or hotkeys), debug fog toggle, and map click target assignment.
 pub fn update_orders_ui(
     (current_level, keyboard_input, mouse_buttons, squad_doctrine, mut fog_enabled): (
@@ -391,20 +461,22 @@ pub fn update_orders_ui(
         Option<Res<SquadDoctrineState>>,
         Option<ResMut<FogOfWarEnabled>>,
     ),
-    (selected_tool, mut selected_group, commander_order, mut apc_order): (
+    (selected_tool, mut selected_group, commander_order, mut apc_order, mut helicopter_order): (
         Option<ResMut<SelectedOrderTool>>,
         Option<ResMut<CommandGroup>>,
         Option<ResMut<CommanderOrder>>,
         Option<ResMut<ApcOrder>>,
+        Option<ResMut<HelicopterOrder>>,
     ),
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    (mut inf_group_btn_q, mut apc_group_btn_q): (
+    (mut inf_group_btn_q, mut apc_group_btn_q, mut heli_group_btn_q): (
         Query<
             (&Interaction, &mut BackgroundColor),
             (
                 With<InfantryGroupButton>,
                 Without<ApcGroupButton>,
+                Without<HelicopterGroupButton>,
                 Without<TakePositionOrderButton>,
                 Without<ClearOrderButton>,
                 Without<FogToggleButton>,
@@ -416,6 +488,19 @@ pub fn update_orders_ui(
             (
                 With<ApcGroupButton>,
                 Without<InfantryGroupButton>,
+                Without<HelicopterGroupButton>,
+                Without<TakePositionOrderButton>,
+                Without<ClearOrderButton>,
+                Without<FogToggleButton>,
+                Without<ApcCrewToggleButton>,
+            ),
+        >,
+        Query<
+            (&Interaction, &mut BackgroundColor),
+            (
+                With<HelicopterGroupButton>,
+                Without<InfantryGroupButton>,
+                Without<ApcGroupButton>,
                 Without<TakePositionOrderButton>,
                 Without<ClearOrderButton>,
                 Without<FogToggleButton>,
@@ -430,6 +515,7 @@ pub fn update_orders_ui(
                 With<TakePositionOrderButton>,
                 Without<InfantryGroupButton>,
                 Without<ApcGroupButton>,
+                Without<HelicopterGroupButton>,
                 Without<ClearOrderButton>,
                 Without<FogToggleButton>,
                 Without<ApcCrewToggleButton>,
@@ -441,6 +527,7 @@ pub fn update_orders_ui(
                 With<ClearOrderButton>,
                 Without<InfantryGroupButton>,
                 Without<ApcGroupButton>,
+                Without<HelicopterGroupButton>,
                 Without<TakePositionOrderButton>,
                 Without<FogToggleButton>,
                 Without<ApcCrewToggleButton>,
@@ -452,6 +539,7 @@ pub fn update_orders_ui(
                 With<FogToggleButton>,
                 Without<InfantryGroupButton>,
                 Without<ApcGroupButton>,
+                Without<HelicopterGroupButton>,
                 Without<TakePositionOrderButton>,
                 Without<ClearOrderButton>,
                 Without<ApcCrewToggleButton>,
@@ -463,6 +551,7 @@ pub fn update_orders_ui(
                 With<ApcCrewToggleButton>,
                 Without<InfantryGroupButton>,
                 Without<ApcGroupButton>,
+                Without<HelicopterGroupButton>,
                 Without<TakePositionOrderButton>,
                 Without<ClearOrderButton>,
                 Without<FogToggleButton>,
@@ -507,15 +596,55 @@ pub fn update_orders_ui(
             ),
         >,
     ),
-    mut apc_q: Query<(&Transform, &Team, &mut ApcVehicle), (Without<OrderObjectiveMarker>, Without<ApcOrderObjectiveMarker>, Without<Camera3d>)>,
-    (mut marker_q, mut apc_marker_q): (
+    (mut apc_q, mut heli_q): (
+        Query<
+            (&Transform, &Team, &mut ApcVehicle),
+            (
+                Without<AttackHelicopter>,
+                Without<OrderObjectiveMarker>,
+                Without<ApcOrderObjectiveMarker>,
+                Without<HelicopterOrderObjectiveMarker>,
+                Without<Camera3d>,
+            ),
+        >,
+        Query<
+            (&Transform, &Team, &mut AttackHelicopter),
+            (
+                Without<ApcVehicle>,
+                Without<OrderObjectiveMarker>,
+                Without<ApcOrderObjectiveMarker>,
+                Without<HelicopterOrderObjectiveMarker>,
+                Without<Camera3d>,
+            ),
+        >,
+    ),
+    (mut marker_q, mut apc_marker_q, mut heli_marker_q): (
         Query<
             (&mut Transform, &mut Visibility),
-            (With<OrderObjectiveMarker>, Without<ApcOrderObjectiveMarker>, Without<Camera3d>),
+            (
+                With<OrderObjectiveMarker>,
+                Without<ApcOrderObjectiveMarker>,
+                Without<HelicopterOrderObjectiveMarker>,
+                Without<Camera3d>,
+            ),
         >,
         Query<
             (&mut Transform, &mut Visibility),
-            (With<ApcOrderObjectiveMarker>, Without<OrderObjectiveMarker>, Without<Camera3d>),
+            (
+                With<ApcOrderObjectiveMarker>,
+                Without<OrderObjectiveMarker>,
+                Without<HelicopterOrderObjectiveMarker>,
+                Without<Camera3d>,
+            ),
+        >,
+        Query<
+            (&mut Transform, &mut Visibility),
+            (
+                With<HelicopterOrderObjectiveMarker>,
+                Without<OrderObjectiveMarker>,
+                Without<ApcOrderObjectiveMarker>,
+                Without<Camera3d>,
+            ),
         >,
     ),
 ) {
@@ -539,7 +668,7 @@ pub fn update_orders_ui(
         .copied()
         .unwrap_or(CommandGroup::InfantrySquad);
 
-    // 0. Unit Group Selection buttons (Infantry Squad vs APC Vehicle)
+    // 0. Unit Group Selection buttons (Infantry Squad, APC Vehicle, Attack Helicopter)
     for (interaction, _) in &mut inf_group_btn_q {
         match *interaction {
             Interaction::Pressed => {
@@ -561,6 +690,21 @@ pub fn update_orders_ui(
                 ui_captured_click = true;
                 if button_just_clicked {
                     active_group = CommandGroup::Apc;
+                }
+            }
+            Interaction::Hovered => {
+                ui_captured_click = true;
+            }
+            Interaction::None => {}
+        }
+    }
+
+    for (interaction, _) in &mut heli_group_btn_q {
+        match *interaction {
+            Interaction::Pressed => {
+                ui_captured_click = true;
+                if button_just_clicked {
+                    active_group = CommandGroup::Helicopter;
                 }
             }
             Interaction::Hovered => {
@@ -652,7 +796,7 @@ pub fn update_orders_ui(
         }
     }
 
-    // 2. Keyboard shortcuts for group selection ([Q]/[E]/[Tab]), order types ([1]/[X]), or toggles ([F]/[G])
+    // 2. Keyboard shortcuts for group selection ([Q]/[E]/[R]/[Tab]), order types ([1]/[X]), or toggles ([F]/[G])
     if let Some(ref keys) = keyboard_input {
         if keys.just_pressed(KeyCode::KeyQ) {
             active_group = CommandGroup::InfantrySquad;
@@ -660,10 +804,14 @@ pub fn update_orders_ui(
         if keys.just_pressed(KeyCode::KeyE) {
             active_group = CommandGroup::Apc;
         }
+        if keys.just_pressed(KeyCode::KeyR) {
+            active_group = CommandGroup::Helicopter;
+        }
         if keys.just_pressed(KeyCode::Tab) {
             active_group = match active_group {
                 CommandGroup::InfantrySquad => CommandGroup::Apc,
-                CommandGroup::Apc => CommandGroup::InfantrySquad,
+                CommandGroup::Apc => CommandGroup::Helicopter,
+                CommandGroup::Helicopter => CommandGroup::InfantrySquad,
             };
         }
         if keys.just_pressed(KeyCode::Digit1) {
@@ -703,6 +851,16 @@ pub fn update_orders_ui(
                     }
                 }
             }
+            CommandGroup::Helicopter => {
+                if let Some(ref mut h_order) = helicopter_order {
+                    h_order.0 = CommanderOrder::Hold;
+                }
+                for (_, team, mut heli) in &mut heli_q {
+                    if *team == Team::Player && matches!(heli.order, VehicleOrder::MoveTo(_)) {
+                        heli.order = VehicleOrder::Hold;
+                    }
+                }
+            }
         }
     }
 
@@ -726,7 +884,7 @@ pub fn update_orders_ui(
 
     // 3. Map Left-Click handling:
     // - If an OrderType is armed, assign the clicked position to the currently selected group (`active_group`).
-    // - If no OrderType is armed, clicking directly on the APC selects `CommandGroup::Apc`.
+    // - If no OrderType is armed, clicking directly on the APC or Helicopter selects its group.
     let left_clicked = mouse_buttons
         .as_ref()
         .is_some_and(|mb| mb.just_pressed(MouseButton::Left));
@@ -772,18 +930,36 @@ pub fn update_orders_ui(
                                         }
                                     }
                                 }
+                                CommandGroup::Helicopter => {
+                                    if let Some(ref mut h_order) = helicopter_order {
+                                        h_order.0 = CommanderOrder::TakePosition(clamped_target);
+                                    }
+                                    for (_, team, mut heli) in &mut heli_q {
+                                        if *team == Team::Player {
+                                            heli.order = VehicleOrder::MoveTo(clamped_target);
+                                        }
+                                    }
+                                }
                             },
                         }
                         selected_tool.0 = None;
                     } else {
-                        // Direct click on APC hull selects the APC group
+                        // Direct click on APC or Helicopter selects its group
+                        let clicked_heli = heli_q.iter().any(|(h_tf, team, _)| {
+                            *team == Team::Player
+                                && (Vec2::new(h_tf.translation.x, h_tf.translation.z) - world_xz)
+                                    .length()
+                                    <= 6.5
+                        });
                         let clicked_apc = apc_q.iter().any(|(v_tf, team, _)| {
                             *team == Team::Player
                                 && (Vec2::new(v_tf.translation.x, v_tf.translation.z) - world_xz)
                                     .length()
                                     <= 5.5
                         });
-                        if clicked_apc {
+                        if clicked_heli {
+                            active_group = CommandGroup::Helicopter;
+                        } else if clicked_apc {
                             active_group = CommandGroup::Apc;
                         }
                     }
@@ -808,6 +984,15 @@ pub fn update_orders_ui(
     }
     for (interaction, mut bg) in &mut apc_group_btn_q {
         *bg = BackgroundColor(if active_group == CommandGroup::Apc {
+            GROUP_BTN_SELECTED
+        } else if *interaction == Interaction::Hovered {
+            ORDER_BTN_HOVER
+        } else {
+            ORDER_BTN_NORMAL
+        });
+    }
+    for (interaction, mut bg) in &mut heli_group_btn_q {
+        *bg = BackgroundColor(if active_group == CommandGroup::Helicopter {
             GROUP_BTN_SELECTED
         } else if *interaction == Interaction::Hovered {
             ORDER_BTN_HOVER
@@ -868,8 +1053,11 @@ pub fn update_orders_ui(
         }
     }
 
-    // 4. Update HUD status readout and 3D objective ground markers for both groups
+    // 4. Update HUD status readout and 3D objective ground markers for all groups
     let current_apc_order = apc_order
+        .as_deref()
+        .map_or(CommanderOrder::Hold, |o| o.0);
+    let current_heli_order = helicopter_order
         .as_deref()
         .map_or(CommanderOrder::Hold, |o| o.0);
     let format_order = |order: CommanderOrder| match order {
@@ -879,10 +1067,12 @@ pub fn update_orders_ui(
     let group_label = match active_group {
         CommandGroup::InfantrySquad => "GROUP 1: INFANTRY SQUAD",
         CommandGroup::Apc => "GROUP 2: APC VEHICLE",
+        CommandGroup::Helicopter => "GROUP 3: HELICOPTER",
     };
     let active_group_order = match active_group {
         CommandGroup::InfantrySquad => *commander_order,
         CommandGroup::Apc => current_apc_order,
+        CommandGroup::Helicopter => current_heli_order,
     };
 
     for (mut text, mut color) in &mut status_text_q {
@@ -894,10 +1084,11 @@ pub fn update_orders_ui(
             *color = TextColor(Color::srgb(0.32, 0.95, 0.68));
         } else {
             **text = format!(
-                "SELECTED [{}]  •  SQUAD: {}  |  APC: {}  •  [1] Order  [X] Hold",
+                "SELECTED [{}]  •  SQUAD: {}  |  APC: {}  |  HELI: {}  •  [1] Order  [X] Hold",
                 group_label,
                 format_order(*commander_order),
                 format_order(current_apc_order),
+                format_order(current_heli_order),
             );
             *color = match active_group_order {
                 CommanderOrder::Hold => TextColor(Color::srgb(0.75, 0.84, 0.92)),
@@ -932,6 +1123,19 @@ pub fn update_orders_ui(
         }
     }
 
+    for (mut tf, mut vis) in &mut heli_marker_q {
+        match current_heli_order {
+            CommanderOrder::Hold => {
+                *vis = Visibility::Hidden;
+            }
+            CommanderOrder::TakePosition(pos) => {
+                tf.translation.x = pos.x;
+                tf.translation.z = pos.y;
+                *vis = Visibility::Visible;
+            }
+        }
+    }
+
     let summary = squad_doctrine.as_deref().map_or_else(
         || "SQUAD 1: NORMAL (Following Commander Intent)".to_string(),
         |d| d.summary_for_squad(0),
@@ -953,6 +1157,7 @@ mod tests {
         app.init_resource::<CommandGroup>();
         app.init_resource::<CommanderOrder>();
         app.init_resource::<ApcOrder>();
+        app.init_resource::<HelicopterOrder>();
         app.init_resource::<FogOfWarEnabled>();
         app.init_resource::<ButtonInput<KeyCode>>();
         app.init_resource::<ButtonInput<MouseButton>>();
@@ -973,6 +1178,10 @@ mod tests {
         );
         assert_eq!(
             app.world().resource::<ApcOrder>().0,
+            CommanderOrder::Hold
+        );
+        assert_eq!(
+            app.world().resource::<HelicopterOrder>().0,
             CommanderOrder::Hold
         );
         assert!(app.world().resource::<FogOfWarEnabled>().0);
@@ -1009,11 +1218,13 @@ mod tests {
             "Pressing F again should toggle FogOfWarEnabled back to true"
         );
 
-        // Assign orders to both groups and verify [X] only clears the currently selected group
+        // Assign orders to all groups and verify [X] only clears the currently selected group
         *app.world_mut().resource_mut::<CommanderOrder>() =
             CommanderOrder::TakePosition(Vec2::new(10.0, 25.0));
         app.world_mut().resource_mut::<ApcOrder>().0 =
             CommanderOrder::TakePosition(Vec2::new(-18.0, 60.0));
+        app.world_mut().resource_mut::<HelicopterOrder>().0 =
+            CommanderOrder::TakePosition(Vec2::new(-25.0, 12.0));
 
         // Switch to Group 2 (APC) via [E] key
         app.world_mut()
@@ -1032,7 +1243,7 @@ mod tests {
             "Pressing E should select CommandGroup::Apc"
         );
 
-        // Press [X] while APC group is selected -> clears ApcOrder to Hold, leaves Infantry Squad order intact!
+        // Press [X] while APC group is selected -> clears ApcOrder to Hold, leaves Infantry Squad & Helicopter orders intact!
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::KeyX);
@@ -1053,6 +1264,44 @@ mod tests {
             CommanderOrder::TakePosition(Vec2::new(10.0, 25.0)),
             "Infantry Squad order must remain untouched when clearing APC order"
         );
+        assert_eq!(
+            app.world().resource::<HelicopterOrder>().0,
+            CommanderOrder::TakePosition(Vec2::new(-25.0, 12.0)),
+            "Helicopter order must remain untouched when clearing APC order"
+        );
+
+        // Press [Tab] to cycle to Group 3 (Helicopter) and press [X] to clear Helicopter order
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Tab);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::Tab);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        assert_eq!(
+            *app.world().resource::<CommandGroup>(),
+            CommandGroup::Helicopter,
+            "Pressing Tab from Apc should cycle to CommandGroup::Helicopter"
+        );
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyX);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(KeyCode::KeyX);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        assert_eq!(
+            app.world().resource::<HelicopterOrder>().0,
+            CommanderOrder::Hold,
+            "Pressing X with Helicopter selected should reset HelicopterOrder to Hold"
+        );
 
         // Press [Tab] to cycle back to Group 1 (Infantry Squad) and press [X] to clear Infantry Squad order
         app.world_mut()
@@ -1068,7 +1317,7 @@ mod tests {
         assert_eq!(
             *app.world().resource::<CommandGroup>(),
             CommandGroup::InfantrySquad,
-            "Pressing Tab should cycle back to CommandGroup::InfantrySquad"
+            "Pressing Tab from Helicopter should cycle back to CommandGroup::InfantrySquad"
         );
 
         app.world_mut()
