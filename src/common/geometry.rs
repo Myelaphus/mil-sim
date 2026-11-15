@@ -768,6 +768,104 @@ pub fn has_clear_shot_past_cover(
     true
 }
 
+/// Routes `origin` around the nearest building or low-wall obstacle that blocks the straight line to `goal`.
+/// Staggers corner waypoints by `slot` so multiple flanking squadmates round corners in parallel lanes
+/// rather than converging on a single pixel and pushing into each other.
+pub fn route_around_obstacles(
+    origin: Vec2,
+    goal: Vec2,
+    slot: usize,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+    soldier_radius: f32,
+) -> Vec2 {
+    if (goal - origin).length_squared() < 0.25 {
+        return goal;
+    }
+
+    let inflate = Vec2::splat(soldier_radius + 0.15);
+    let mut closest_blocker: Option<(Vec2, Vec2, f32)> = None;
+
+    let mut check_obs = |center: Vec2, half: Vec2| {
+        let exp_min = center - half - inflate;
+        let exp_max = center + half + inflate;
+        if line_intersects_box(origin, goal, exp_min, exp_max) {
+            let closest_pt = origin.clamp(center - half, center + half);
+            let dist_sq = (origin - closest_pt).length_squared();
+            if closest_blocker.map_or(true, |(_, _, best_d2)| dist_sq < best_d2) {
+                closest_blocker = Some((center, half, dist_sq));
+            }
+        }
+    };
+
+    for (b_tf, b_col) in buildings {
+        check_obs(Vec2::new(b_tf.translation.x, b_tf.translation.z), b_col.half_size);
+    }
+    for (w_tf, w_col) in low_walls {
+        check_obs(Vec2::new(w_tf.translation.x, w_tf.translation.z), w_col.half_size);
+    }
+
+    let Some((obs_center, obs_half, _)) = closest_blocker else {
+        return goal;
+    };
+
+    let raw_min = obs_center - obs_half;
+    let raw_max = obs_center + obs_half;
+    let dx_out = (raw_min.x - origin.x).max(origin.x - raw_max.x).max(0.0);
+    let dy_out = (raw_min.y - origin.y).max(origin.y - raw_max.y).max(0.0);
+    let safe_inflate = (dx_out.max(dy_out) - 0.05).clamp(0.05, soldier_radius * 0.8);
+    let check_min = raw_min - Vec2::splat(safe_inflate);
+    let check_max = raw_max + Vec2::splat(safe_inflate);
+
+    let slot_f = (slot % 5) as f32;
+    let pad = soldier_radius + 0.42 + slot_f * 0.15;
+    let raw_corners = [
+        Vec2::new(raw_min.x - pad, raw_min.y - pad),
+        Vec2::new(raw_max.x + pad, raw_min.y - pad),
+        Vec2::new(raw_min.x - pad, raw_max.y + pad),
+        Vec2::new(raw_max.x + pad, raw_max.y + pad),
+    ];
+
+    let mut best_corner: Option<(Vec2, f32)> = None;
+    for raw_c in raw_corners {
+        let c = resolve_circle_obstacle_collision_bounded(
+            raw_c,
+            soldier_radius + 0.08,
+            buildings,
+            low_walls,
+            RTS_SOLDIER_WORLD_BOUND,
+        );
+        let d_origin = (c - origin).length();
+        if d_origin < 0.85 {
+            continue;
+        }
+        // Corner must remain outside the blocking obstacle and reachable without cutting through it
+        if c.x > check_min.x && c.x < check_max.x && c.y > check_min.y && c.y < check_max.y {
+            continue;
+        }
+        if line_intersects_box(origin, c, check_min, check_max) {
+            continue;
+        }
+        let mut score = d_origin + (goal - c).length();
+        // Penalize corners whose leg from `origin` is blocked by another building
+        for (b_tf, b_col) in buildings {
+            let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+            if (b_center - obs_center).length_squared() < 0.01 {
+                continue;
+            }
+            if line_intersects_box(origin, c, b_center - b_col.half_size, b_center + b_col.half_size)
+            {
+                score += 20.0;
+            }
+        }
+        if best_corner.map_or(true, |(_, best_s)| score < best_s) {
+            best_corner = Some((c, score));
+        }
+    }
+
+    best_corner.map_or(goal, |(c, _)| c)
+}
+
 /// Computes the next flanking waypoint along cover towards an enfilade position (perpendicular to
 /// enemy cover) where the flanking soldier has a clear, unobstructed shot on `enemy_pos`.
 pub fn compute_flank_waypoint(
@@ -779,90 +877,160 @@ pub fn compute_flank_waypoint(
     low_walls: &[(&Transform, &LowWallCollider)],
     soldier_radius: f32,
 ) -> Vec2 {
-    // Determine outer lateral bounds of cover structures that actually lie near the enemy's firing line
-    // (within 13.5m of `enemy_pos`), so distant decorative buildings don't push the flank corridor 30m+ away.
-    let mut min_x = enemy_pos.x - 7.5;
-    let mut max_x = enemy_pos.x + 7.5;
+    // Determine lateral bounds of low-wall cover structures immediately shielding `enemy_pos`
+    // (within 9.0m), without letting nearby buildings push the flank target inside a building footprint.
+    let mut min_x = enemy_pos.x - 4.8;
+    let mut max_x = enemy_pos.x + 4.8;
 
     for (w_tf, w_col) in low_walls {
         let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
-        if (center - enemy_pos).length() < 13.5 {
+        if (center - enemy_pos).length() < 9.0 {
             min_x = min_x.min(center.x - w_col.half_size.x);
             max_x = max_x.max(center.x + w_col.half_size.x);
         }
     }
-    for (b_tf, b_col) in buildings {
-        let center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
-        if (center - enemy_pos).length() < 13.5 {
-            min_x = min_x.min(center.x - b_col.half_size.x);
-            max_x = max_x.max(center.x + b_col.half_size.x);
+
+    let side_sign: f32 = if flank_right { 1.0 } else { -1.0 };
+    let slot_f = (slot % 5) as f32;
+    let slot_z_target = (slot_f - 2.0) * 1.45;
+    let slot_x_nudge = (slot % 2) as f32 * 0.45;
+
+    let min_lat_clearance = if flank_right {
+        (max_x - enemy_pos.x + soldier_radius + 0.45).clamp(4.5, 13.5)
+    } else {
+        (enemy_pos.x - min_x + soldier_radius + 0.45).clamp(4.5, 13.5)
+    };
+
+    let lat_candidates = [
+        min_lat_clearance + slot_x_nudge,
+        min_lat_clearance + 0.85 + slot_x_nudge,
+        5.2 + slot_x_nudge,
+        6.4 + slot_x_nudge,
+        7.8 + slot_x_nudge,
+        9.4 + slot_x_nudge,
+        11.2 + slot_x_nudge,
+        13.2 + slot_x_nudge,
+    ];
+    let z_candidates = [
+        slot_z_target,
+        slot_z_target - 1.35,
+        slot_z_target + 1.35,
+        slot_z_target - 2.7,
+        slot_z_target + 2.7,
+        -4.2,
+        4.2,
+    ];
+
+    let mut best_goal: Option<(Vec2, f32)> = None;
+
+    for side_mult in [side_sign, -side_sign] {
+        let side_penalty = if (side_mult - side_sign).abs() < 0.1 {
+            0.0
+        } else {
+            35.0
+        };
+        for &lat in &lat_candidates {
+            for &z_off in &z_candidates {
+                let cand = Vec2::new(enemy_pos.x + side_mult * lat, enemy_pos.y + z_off);
+                let res = resolve_circle_obstacle_collision_bounded(
+                    cand,
+                    soldier_radius + 0.12,
+                    buildings,
+                    low_walls,
+                    RTS_SOLDIER_WORLD_BOUND,
+                );
+                if (res - cand).length_squared() > 0.04 {
+                    continue;
+                }
+                let dist_to_enemy = (res - enemy_pos).length();
+                if !(4.2..=18.5).contains(&dist_to_enemy) {
+                    continue;
+                }
+                if !has_clear_shot_past_cover(res, enemy_pos, buildings, low_walls) {
+                    continue;
+                }
+
+                let z_err = (res.y - (enemy_pos.y + slot_z_target)).abs();
+                let lat_err = ((res.x - enemy_pos.x) * side_mult - min_lat_clearance).abs();
+                let travel_dist = (res - soldier_pos).length();
+
+                let mut building_block_penalty = 0.0;
+                for (b_tf, b_col) in buildings {
+                    let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+                    let b_min = b_center - b_col.half_size - Vec2::splat(soldier_radius);
+                    let b_max = b_center + b_col.half_size + Vec2::splat(soldier_radius);
+                    if line_intersects_box(soldier_pos, res, b_min, b_max) {
+                        building_block_penalty += 18.0;
+                    }
+                }
+
+                let score = side_penalty
+                    + building_block_penalty
+                    + z_err * 2.2
+                    + lat_err * 0.65
+                    + travel_dist * 0.22;
+
+                if best_goal.map_or(true, |(_, best_s)| score < best_s) {
+                    best_goal = Some((res, score));
+                }
+            }
+        }
+        if best_goal.is_some() {
+            break;
         }
     }
 
-    let stand_off = soldier_radius + 0.55;
-    let base_flank_x = if flank_right {
-        (max_x + stand_off).min(enemy_pos.x + 15.0)
-    } else {
-        (min_x - stand_off).max(enemy_pos.x - 15.0)
-    };
+    let goal = best_goal.map_or_else(
+        || {
+            let fallback = Vec2::new(
+                enemy_pos.x + side_sign * (min_lat_clearance + slot_f * 0.55),
+                enemy_pos.y + slot_z_target,
+            );
+            resolve_circle_obstacle_collision_bounded(
+                fallback,
+                soldier_radius,
+                buildings,
+                low_walls,
+                RTS_SOLDIER_WORLD_BOUND,
+            )
+        },
+        |(g, _)| g,
+    );
 
-    // Stagger slots in both lateral (X) and longitudinal (Z) axes so flanking soldiers never
-    // converge on the exact same corner coordinate and get stuck pushing into one another.
-    let side_sign = if flank_right { 1.0 } else { -1.0 };
-    let slot_f = slot as f32;
-    let flank_x = base_flank_x + side_sign * (slot_f * 0.75);
-    let slot_z_offset = (slot_f - 1.5) * 1.45;
-    let target_y = enemy_pos.y + slot_z_offset;
-    let final_spot = Vec2::new(flank_x, target_y);
-
-    // Stage 1: Move laterally behind current cover out to the flank corridor (`flank_x`) first
-    // before advancing towards the enemy depth (`target_y`), so flankers don't cut across the open center.
-    // Once at the flank corridor or if a building blocks the direct path from `final_spot` to `enemy_pos`,
-    // close inward to a clear line-of-fire position within 15m of `enemy_pos`.
-    if (soldier_pos.x - flank_x).abs() > 2.5 && (soldier_pos.y - enemy_pos.y).abs() > 4.5 {
-        let corner = Vec2::new(flank_x, soldier_pos.y + (slot_f - 2.0) * 0.65);
-        resolve_circle_obstacle_collision_bounded(
-            corner,
-            soldier_radius,
-            buildings,
-            low_walls,
-            RTS_SOLDIER_WORLD_BOUND,
-        )
-    } else {
-        let resolved_final = resolve_circle_obstacle_collision_bounded(
-            final_spot,
-            soldier_radius,
+    // If the soldier is still directly in front of the enemy's center line and far out in depth,
+    // peel off laterally toward `goal.x` first before closing depth, unless a building blocks that peel-off.
+    let target_for_routing = if (soldier_pos.x - enemy_pos.x) * side_sign < 2.5
+        && (soldier_pos.y - enemy_pos.y).abs() > 4.5
+        && (goal.x - enemy_pos.x) * side_sign >= 4.0
+    {
+        let peel = Vec2::new(
+            goal.x,
+            soldier_pos.y + (goal.y - soldier_pos.y).clamp(-2.5, 2.5),
+        );
+        let res_peel = resolve_circle_obstacle_collision_bounded(
+            peel,
+            soldier_radius + 0.1,
             buildings,
             low_walls,
             RTS_SOLDIER_WORLD_BOUND,
         );
-        if has_clear_shot_past_cover(resolved_final, enemy_pos, buildings, low_walls)
-            && (resolved_final - enemy_pos).length() <= 17.0
-        {
-            resolved_final
+        if (res_peel - peel).length_squared() < 0.09 {
+            res_peel
         } else {
-            // Search inward/around the enemy flank for an unobstructed firing spot within 15m
-            for dist in [9.5_f32, 12.0, 14.5] {
-                for z_shift in [slot_z_offset, slot_z_offset - 3.5, slot_z_offset + 3.5, -5.0, 5.0]
-                {
-                    let cand = Vec2::new(enemy_pos.x + side_sign * dist, enemy_pos.y + z_shift);
-                    let res = resolve_circle_obstacle_collision_bounded(
-                        cand,
-                        soldier_radius,
-                        buildings,
-                        low_walls,
-                        RTS_SOLDIER_WORLD_BOUND,
-                    );
-                    if (res - cand).length_squared() < 0.09
-                        && has_clear_shot_past_cover(res, enemy_pos, buildings, low_walls)
-                    {
-                        return res;
-                    }
-                }
-            }
-            resolved_final
+            goal
         }
-    }
+    } else {
+        goal
+    };
+
+    route_around_obstacles(
+        soldier_pos,
+        target_for_routing,
+        slot,
+        buildings,
+        low_walls,
+        soldier_radius,
+    )
 }
 
 #[cfg(test)]

@@ -115,6 +115,7 @@ mod tests {
                 vehicle::update_dismounted_crew_return,
                 vehicle::resolve_soldier_apc_collisions,
                 vehicle::update_attack_helicopters,
+                vehicle::update_field_artillery,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
                 resolve_soldier_pairwise_collisions,

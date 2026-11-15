@@ -5,8 +5,6 @@ ammo types and penetration
 armor system
 light vs medium vs heavy cover
 vehicle components and damage system
-attack helicopter model
-attack helicopter combat and AI
 fighter plane model
 fighter plane combat and AI
 fire team loadout differences

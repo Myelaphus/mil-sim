@@ -229,6 +229,7 @@ pub struct SquadDoctrineEntry {
     pub phase: SquadTacticalPhase,
     pub contact_lost_timer: f32,
     pub perceived_enemy_count: usize,
+    pub known_enemy_positions: Vec<Vec2>,
     pub leader_role: SquadLeaderRole,
     pub leader_slot: Option<(usize, usize)>,
     pub had_nine_man_sl_at_1_0: bool,
@@ -241,6 +242,7 @@ impl Default for SquadDoctrineEntry {
             phase: SquadTacticalPhase::Normal,
             contact_lost_timer: 0.0,
             perceived_enemy_count: 0,
+            known_enemy_positions: Vec::new(),
             leader_role: SquadLeaderRole::SquadLeader,
             leader_slot: None,
             had_nine_man_sl_at_1_0: false,
@@ -261,6 +263,24 @@ impl SquadDoctrineState {
 
     pub fn entry_mut(&mut self, sq_id: usize) -> &mut SquadDoctrineEntry {
         self.squads.entry(sq_id).or_default()
+    }
+
+    /// Returns the target coordinates (`Vec2`) when a Squad Leader is calling for fire support
+    /// (`SquadLeaderDecision::FixAndSupport { target_center }`).
+    pub fn active_support_coordinates(&self) -> Option<Vec2> {
+        let mut squad_ids: Vec<usize> = self.squads.keys().copied().collect();
+        squad_ids.sort_unstable();
+        for sq_id in squad_ids {
+            if let Some(entry) = self.squads.get(&sq_id) {
+                if let SquadTacticalPhase::DecisionActive(SquadLeaderDecision::FixAndSupport {
+                    target_center,
+                }) = entry.phase
+                {
+                    return Some(target_center);
+                }
+            }
+        }
+        None
     }
 
     pub fn summary_for_squad(&self, sq_id: usize) -> String {
@@ -293,9 +313,15 @@ impl SquadDoctrineState {
                     )
                 }
             }
-            SquadTacticalPhase::DecisionActive(decision) => {
-                format!("SQUAD 1 [{cmd_title} ORDER]: {}", decision.label())
-            }
+            SquadTacticalPhase::DecisionActive(decision) => match decision {
+                SquadLeaderDecision::FixAndSupport { target_center } => format!(
+                    "SQUAD 1 [{cmd_title} ORDER]: {} • Fire Support Coords ({:.0}, {:.0})",
+                    decision.label(),
+                    target_center.x,
+                    target_center.y
+                ),
+                _ => format!("SQUAD 1 [{cmd_title} ORDER]: {}", decision.label()),
+            },
         }
     }
 }

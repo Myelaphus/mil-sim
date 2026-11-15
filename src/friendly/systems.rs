@@ -3,6 +3,7 @@ use crate::common::geometry::{
     apply_shoot_spread, can_see_target, compute_flank_waypoint, directional_speed_multiplier,
     find_avoidance_direction, find_cover_position_with_offset, has_clear_shot_past_cover,
     has_low_wall_in_line_of_fire, is_near_low_wall, resolve_circle_obstacle_collision_bounded,
+    route_around_obstacles,
 };
 use crate::common::types::{
     CommanderOrder, CurrentLevel, GunshotEvent, LevelEntity, RTS_SOLDIER_WORLD_BOUND,
@@ -371,9 +372,9 @@ pub fn evaluate_squad_leader_mett_tc(
 
     // Decision 3: Fix and Call for Support (Hold in Place)
     // Chosen when the enemy position is too large or fortified for a single squad to assault alone
-    // (>= 6 perceived enemies vs equal/smaller squad, or >= 4 enemies with no cover to maneuver).
+    // (>= 5 perceived enemies vs comparable/smaller squad, or >= 4 enemies with no cover to maneuver).
     let large_entrenched_enemy =
-        perceived_enemy_count >= 6 && perceived_enemy_count + 1 >= squad_alive_count;
+        perceived_enemy_count >= 5 && perceived_enemy_count + 4 >= squad_alive_count;
     let no_covered_flank = perceived_enemy_count >= 4 && !has_nearby_cover;
     if large_entrenched_enemy || no_covered_flank {
         return SquadLeaderDecision::FixAndSupport {
@@ -761,6 +762,7 @@ pub fn update_friendly(
                 if entry.last_commander_order.is_some() && !has_contact {
                     entry.phase = SquadTacticalPhase::Normal;
                     entry.perceived_enemy_count = 0;
+                    entry.known_enemy_positions.clear();
                 }
                 entry.last_commander_order = Some(active_commander_order);
             }
@@ -775,8 +777,17 @@ pub fn update_friendly(
                 entry.leader_slot = None;
             }
             if has_contact {
-                entry.perceived_enemy_count =
-                    perceived_enemy_count.max(entry.perceived_enemy_count);
+                for p in &perceived_positions {
+                    if !entry
+                        .known_enemy_positions
+                        .iter()
+                        .any(|kp| (*kp - *p).length_squared() < 25.0)
+                    {
+                        entry.known_enemy_positions.push(*p);
+                    }
+                }
+                let tracked_count = perceived_enemy_count.max(entry.known_enemy_positions.len());
+                entry.perceived_enemy_count = tracked_count.max(entry.perceived_enemy_count);
                 entry.contact_lost_timer = 0.0;
             } else {
                 entry.contact_lost_timer += dt;
@@ -891,8 +902,8 @@ pub fn update_friendly(
                                         bound_timer: 3.0,
                                     },
                                 );
-                            } else if perceived_enemy_count >= 6
-                                && perceived_enemy_count + 1 >= squad_alive_count
+                            } else if entry.perceived_enemy_count >= 5
+                                && entry.perceived_enemy_count + 4 >= squad_alive_count
                             {
                                 entry.phase = SquadTacticalPhase::DecisionActive(
                                     SquadLeaderDecision::FixAndSupport {
@@ -902,6 +913,7 @@ pub fn update_friendly(
                             } else if entry.contact_lost_timer > 2.0 {
                                 entry.phase = SquadTacticalPhase::Normal;
                                 entry.perceived_enemy_count = 0;
+                                entry.known_enemy_positions.clear();
                             } else {
                                 entry.phase = SquadTacticalPhase::DecisionActive(decision);
                             }
@@ -945,6 +957,7 @@ pub fn update_friendly(
                             } else if entry.contact_lost_timer > 2.0 {
                                 entry.phase = SquadTacticalPhase::Normal;
                                 entry.perceived_enemy_count = 0;
+                                entry.known_enemy_positions.clear();
                             } else {
                                 entry.phase = SquadTacticalPhase::DecisionActive(decision);
                             }
@@ -1434,9 +1447,10 @@ pub fn update_friendly(
                                     };
                                     let side = if flank_right { 1.0 } else { -1.0 };
                                     // Stop and engage once the flanker has displaced laterally onto the flank
-                                    // (`|x - target_center.x| >= 4.0`) and has a clear line of fire within vision range
+                                    // (`|x - target.x| >= 3.2`) and has a clear line of fire within vision range
                                     let on_flank_corridor =
-                                        (friendly_pos.x - target_center.x).abs() >= 4.0;
+                                        (friendly_pos.x - target_center.x).abs() >= 3.2
+                                            || (friendly_pos.x - target.x).abs() >= 3.2;
                                     if clear_shot
                                         && (dist <= 16.5 || (on_flank_corridor && dist <= 22.5))
                                     {
@@ -1446,7 +1460,7 @@ pub fn update_friendly(
                                         let step_goal = if !clear_shot {
                                             compute_flank_waypoint(
                                                 friendly_pos,
-                                                target_center,
+                                                target,
                                                 flank_right,
                                                 flank_slot,
                                                 &buildings,
@@ -1454,15 +1468,30 @@ pub fn update_friendly(
                                                 soldier_radius,
                                             )
                                         } else {
-                                            target
+                                            let raw_goal = target
                                                 + Vec2::new(
-                                                    side * (5.5 + flank_slot as f32 * 0.9),
+                                                    side * (5.2 + flank_slot as f32 * 0.85),
                                                     (flank_slot as f32 - 2.0) * 1.4,
-                                                )
+                                                );
+                                            let res_goal = resolve_circle_obstacle_collision_bounded(
+                                                raw_goal,
+                                                soldier_radius,
+                                                &buildings,
+                                                &low_walls,
+                                                world_bound,
+                                            );
+                                            route_around_obstacles(
+                                                friendly_pos,
+                                                res_goal,
+                                                flank_slot,
+                                                &buildings,
+                                                &low_walls,
+                                                soldier_radius,
+                                            )
                                         };
                                         let to_goal = step_goal - friendly_pos;
                                         let dist_to_goal = to_goal.length();
-                                        if dist_to_goal > 0.75 {
+                                        if dist_to_goal > 0.65 {
                                             is_moving = true;
                                             soldier.stance = Stance::Standing;
                                             let desired_move = to_goal / dist_to_goal;
@@ -1484,9 +1513,9 @@ pub fn update_friendly(
                                                 }
                                                 let diff = friendly_pos - *other_pos;
                                                 let d2 = diff.length_squared();
-                                                if d2 > 0.0001 && d2 < 2.25 {
+                                                if d2 > 0.0001 && d2 < 3.24 {
                                                     let d = d2.sqrt();
-                                                    sep += (diff / d) * ((1.5 - d) / 1.5);
+                                                    sep += (diff / d) * ((1.8 - d) / 1.8);
                                                 }
                                             }
                                             if sep.length_squared() > 0.001 {
@@ -4485,6 +4514,199 @@ mod tests {
         assert_eq!(
             bullets_fired, 0,
             "Surviving soldier at BreakContact rally point with no visible enemy contact must hold fire instead of shooting into nothing"
+        );
+    }
+
+    /// Regression test: When flanking an enemy behind the South-East low wall `(6.5, 44.0)` next to
+    /// Building #10 (`(18.0, 42.0)`, `half_size = (6.5, 5.0)`), the flanking assault element (SL + FT2)
+    /// must not get stuck on the south wall of Building #10 or bunch up on each other, and must advance
+    /// into clear firing positions even if they start directly south of Building #10.
+    #[test]
+    fn test_flankers_do_not_get_stuck_on_adjacent_building_or_each_other() {
+        let mut app = create_test_app();
+        app.insert_resource(CurrentLevel::Level4);
+        app.insert_resource(SquadCommand::Formation);
+        app.insert_resource(CommanderOrder::TakePosition(Vec2::new(6.5, 48.0)));
+
+        let enemy_pos = Vec2::new(5.0, 41.5);
+        let mut doctrine = SquadDoctrineState::default();
+        doctrine.entry_mut(0).phase =
+            SquadTacticalPhase::DecisionActive(SquadLeaderDecision::SquadAttack {
+                flank_right: true,
+                target_center: enemy_pos,
+            });
+        app.insert_resource(doctrine);
+
+        // Spawn South-East low wall `(6.5, 44.0)` and Building #10 `(18.0, 42.0)`
+        app.world_mut().spawn((
+            Transform::from_xyz(6.5, 0.5, 44.0),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(2.75, 0.45),
+            },
+        ));
+        app.world_mut().spawn((
+            Transform::from_xyz(6.5, 0.5, 52.0),
+            LowWall,
+            LowWallCollider {
+                half_size: Vec2::new(2.75, 0.45),
+            },
+        ));
+        app.world_mut().spawn((
+            Transform::from_xyz(18.0, 2.0, 42.0),
+            Building,
+            BuildingCollider {
+                half_size: Vec2::new(6.5, 5.0),
+            },
+        ));
+
+        app.world_mut().spawn((
+            Transform::from_xyz(enemy_pos.x, 0.05, enemy_pos.y),
+            Enemy {
+                state: crate::enemy::ai::EnemyAiState::Search,
+                current_waypoint_idx: 0,
+                last_known_player_pos: Some(Vec2::new(6.5, 50.0)),
+                investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                speed: 5.5,
+                vision_range: 24.0,
+                vision_half_angle: 45.0_f32.to_radians(),
+                inner_radius: 2.0,
+                stuck_timer: 0.0,
+                last_pos: enemy_pos,
+            },
+            Team::Enemy,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Crouching,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        // Spawn Fire Team 1 (base of fire, 4 soldiers) + Squad Leader + Fire Team 2 (5 flanking soldiers)
+        for slot in 0..4 {
+            app.world_mut().spawn((
+                Transform::from_xyz(5.0 + slot as f32 * 0.9, 0.05, 45.2),
+                Friendly {
+                    fireteam: 1,
+                    slot,
+                    state: FriendlyAiState::Engage,
+                    shoot_timer: Timer::from_seconds(0.15, TimerMode::Repeating),
+                    speed: 7.0,
+                    vision_range: 26.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.5,
+                    target_pos: Some(enemy_pos),
+                    target_lost_timer: 0.0,
+                },
+                Team::Player,
+                SquadId(0),
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Crouching,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+                Suppression::default(),
+            ));
+        }
+
+        // Spawn the 5 flanking soldiers (SL + FT2 slots 0..=3) starting right against the south face of Building #10
+        let mut flanker_entities = Vec::new();
+        for i in 0..5 {
+            let (fireteam, slot) = if i == 0 { (0, 0) } else { (2, i - 1) };
+            let start_x = 16.5 + (i as f32) * 0.45;
+            let start_z = 47.7 + (i % 2) as f32 * 0.35;
+            let ent = app
+                .world_mut()
+                .spawn((
+                    Transform::from_xyz(start_x, 0.05, start_z),
+                    Friendly {
+                        fireteam,
+                        slot,
+                        state: FriendlyAiState::Engage,
+                        shoot_timer: Timer::from_seconds(0.15, TimerMode::Repeating),
+                        speed: 7.0,
+                        vision_range: 26.0,
+                        vision_half_angle: 45.0_f32.to_radians(),
+                        inner_radius: 2.5,
+                        target_pos: Some(enemy_pos),
+                        target_lost_timer: 0.0,
+                    },
+                    Team::Player,
+                    SquadId(0),
+                    Soldier {
+                        facing_dir: Vec2::new(-1.0, 0.0),
+                        shoot_cooldown: Timer::from_seconds(0.1, TimerMode::Once),
+                        stance: Stance::Standing,
+                        inventory: crate::common::types::Inventory::default(),
+                    },
+                    Suppression::default(),
+                ))
+                .id();
+            flanker_entities.push(ent);
+        }
+
+        app.add_systems(Update, update_friendly);
+
+        for _ in 0..100 {
+            // Re-lock SquadAttack phase in case the test app doesn't run doctrine evaluation
+            app.world_mut()
+                .resource_mut::<SquadDoctrineState>()
+                .entry_mut(0)
+                .phase = SquadTacticalPhase::DecisionActive(SquadLeaderDecision::SquadAttack {
+                flank_right: true,
+                target_center: enemy_pos,
+            });
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let buildings = [(
+            Transform::from_xyz(18.0, 2.0, 42.0),
+            BuildingCollider {
+                half_size: Vec2::new(6.5, 5.0),
+            },
+        )];
+        let low_walls = [
+            (
+                Transform::from_xyz(6.5, 0.5, 44.0),
+                LowWallCollider {
+                    half_size: Vec2::new(2.75, 0.45),
+                },
+            ),
+            (
+                Transform::from_xyz(6.5, 0.5, 52.0),
+                LowWallCollider {
+                    half_size: Vec2::new(2.75, 0.45),
+                },
+            ),
+        ];
+        let b_refs: Vec<(&Transform, &BuildingCollider)> =
+            buildings.iter().map(|(t, c)| (t, c)).collect();
+        let w_refs: Vec<(&Transform, &LowWallCollider)> =
+            low_walls.iter().map(|(t, c)| (t, c)).collect();
+
+        let mut clear_shot_count = 0;
+        for &ent in &flanker_entities {
+            let tf = app.world().get::<Transform>(ent).unwrap();
+            let pos = Vec2::new(tf.translation.x, tf.translation.z);
+            // None of the flankers should remain stuck under Building #10's south face (X > 12.0, Z > 47.0)
+            assert!(
+                !(pos.x > 12.0 && pos.y > 46.8),
+                "Flanker remained stuck on the south wall of Building #10 at {:?}",
+                pos
+            );
+            if has_clear_shot_past_cover(pos, enemy_pos, &b_refs, &w_refs) {
+                clear_shot_count += 1;
+            }
+        }
+        assert!(
+            clear_shot_count >= 4,
+            "Expected at least 4 of 5 flankers to reach unobstructed firing positions around Building #10, got {}",
+            clear_shot_count
         );
     }
 }

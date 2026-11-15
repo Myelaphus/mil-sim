@@ -87,6 +87,23 @@ pub const HELICOPTER_CANNON_BARREL_TIP_OFFSET: f32 = 1.55;
 pub const LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS: Vec2 = Vec2::new(-16.0, 192.0);
 pub const LEVEL_4_FRIENDLY_HELICOPTER_FACING: Vec2 = Vec2::new(0.0, -1.0);
 
+/// M119A3 105mm Light Towed Field Artillery constants:
+/// - Stationary emplacement that rotates on its central firing platform axis very slowly (`0.45 rad/s` ≈ `25.8°/s`).
+/// - Firing range covers the entire map (`2000.0 m`).
+/// - Slow-firing cadence (`5.5 s` between shells), with shells exploding in a medium circle (`7.5 m` radius = `15.0 m` diameter) on impact.
+/// - Long 105mm howitzer barrel (`5.6 m` barrel length).
+pub const ARTILLERY_ROTATION_SPEED_RAD: f32 = 0.45;
+pub const ARTILLERY_FIRING_RANGE: f32 = 2000.0;
+pub const ARTILLERY_RELOAD_SECS: f32 = 5.5;
+pub const ARTILLERY_SHELL_SPEED: f32 = 65.0;
+pub const ARTILLERY_BLAST_RADIUS: f32 = 7.5;
+pub const ARTILLERY_BARREL_LENGTH: f32 = 5.6;
+pub const ARTILLERY_BARREL_MUZZLE_OFFSET: f32 = 5.2;
+
+/// Default emplacement position for the friendly M119A3 Field Artillery in `test_level_4` (east of the southern approach road).
+pub const LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS: Vec2 = Vec2::new(16.0, 206.0);
+pub const LEVEL_4_FRIENDLY_ARTILLERY_FACING: Vec2 = Vec2::new(0.0, -1.0);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VehicleCrewRole {
     Driver,
@@ -393,6 +410,78 @@ pub struct HelicopterAutocannon {
     pub helicopter: Entity,
 }
 
+/// Stationary M119A3 105mm light towed field artillery piece that can rotate very slowly on its
+/// central firing platform axis, has full-map indirect-fire range, and fires high-explosive
+/// shells that explode in a medium circle on impact when a Squad Leader calls for support
+/// and provides target coordinates.
+#[derive(Component, Debug, Clone)]
+pub struct FieldArtillery {
+    /// Current forward heading unit vector of the howitzer barrel on the XZ plane.
+    pub heading: Vec2,
+    /// Very slow traverse rotation speed (`rad/s`) on its central axis.
+    pub rotation_speed_rad: f32,
+    /// Maximum indirect-fire range (`m`) — covers the entire map.
+    pub firing_range: f32,
+    /// Active target coordinates (`Some(Vec2)`) provided by the Squad Leader calling for support (or assigned directly).
+    pub target_coords: Option<Vec2>,
+    /// Tracks whether `target_coords` was assigned by a Squad Leader's support call.
+    pub called_by_squad_leader: bool,
+    /// Slow-firing reload timer between 105mm HE shells.
+    pub reload_timer: Timer,
+    /// Hydro-pneumatic recoil displacement (`m`, kicks back on firing and smoothly recuperates to `0.0`).
+    pub recoil_offset: f32,
+}
+
+impl Default for FieldArtillery {
+    fn default() -> Self {
+        let mut reload_timer = Timer::from_seconds(ARTILLERY_RELOAD_SECS, TimerMode::Once);
+        reload_timer.tick(std::time::Duration::from_secs_f32(ARTILLERY_RELOAD_SECS));
+        Self {
+            heading: LEVEL_4_FRIENDLY_ARTILLERY_FACING,
+            rotation_speed_rad: ARTILLERY_ROTATION_SPEED_RAD,
+            firing_range: ARTILLERY_FIRING_RANGE,
+            target_coords: None,
+            called_by_squad_leader: false,
+            reload_timer,
+            recoil_offset: 0.0,
+        }
+    }
+}
+
+impl FieldArtillery {
+    /// World-space XZ position of the long M119A3 barrel muzzle tip given the artillery emplacement's
+    /// world XZ center position `artillery_pos`.
+    pub fn muzzle_world_pos(&self, artillery_pos: Vec2) -> Vec2 {
+        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
+        artillery_pos + forward * ARTILLERY_BARREL_MUZZLE_OFFSET
+    }
+}
+
+/// Marker component for the long M119A3 105mm barrel assembly on a `FieldArtillery` piece.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ArtilleryBarrel {
+    pub artillery: Entity,
+}
+
+/// In-flight 105mm high-explosive artillery shell traveling along a ballistic arc toward `target_pos`.
+#[derive(Component, Debug, Clone)]
+pub struct ArtilleryShell {
+    pub origin: Vec2,
+    pub target_pos: Vec2,
+    pub speed: f32,
+    pub total_distance: f32,
+    pub traveled_distance: f32,
+    pub blast_radius: f32,
+    pub team: Team,
+}
+
+/// Expanding medium-circle visual blast effect spawned when an `ArtilleryShell` impacts at `target_pos`.
+#[derive(Component, Debug, Clone)]
+pub struct ArtilleryExplosion {
+    pub timer: Timer,
+    pub blast_radius: f32,
+}
+
 pub struct VehiclePlugin;
 
 impl Plugin for VehiclePlugin {
@@ -406,6 +495,7 @@ impl Plugin for VehiclePlugin {
                     update_dismounted_crew_return,
                     resolve_soldier_apc_collisions,
                     update_attack_helicopters,
+                    update_field_artillery,
                 )
                     .chain()
                     .run_if(in_state(AppState::InGame)),
@@ -977,7 +1067,215 @@ pub fn spawn_attack_helicopter(
     (helicopter_entity, main_rotor_entity, tail_rotor_entity)
 }
 
-/// Spawns the friendly APC and friendly Attack Helicopter in `test_level_4`.
+/// Spawns a stationary M119A3 105mm light towed howitzer field artillery piece for `team` at `pos`
+/// facing `facing` (`Vec2` on the XZ plane).
+///
+/// Modelled after the U.S. Army M119A3 105mm howitzer:
+/// - Circular central firing platform / turntable (`Cylinder`) allowing 360° axis rotation.
+/// - Lower carriage axle with two pneumatic road wheels (`Cylinder`s on left and right).
+/// - Rearward box trail beam (`+Z`) terminating in wide entrenched ground stabilizer spades and a tow lunette.
+/// - Sloped left/right gun shields flanking the breech and an M119A3 digital fire control display unit.
+/// - Elevating cradle, hydro-pneumatic recoil recuperator cylinder, heavy breech block, and a
+///   long 105mm L/30 barrel (`ARTILLERY_BARREL_LENGTH = 5.6 m`) extending forward (`-Z`) with a
+///   stepped muzzle collar.
+///
+/// Returns `(artillery_entity, barrel_entity)`.
+pub fn spawn_field_artillery(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    team: Team,
+    pos: Vec2,
+    facing: Vec2,
+) -> (Entity, Entity) {
+    let forward = facing.normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
+    let yaw = f32::atan2(-forward.x, -forward.y);
+
+    let (olive_color, shield_color) = match team {
+        Team::Player => (
+            Color::srgb(0.24, 0.34, 0.22),
+            Color::srgb(0.20, 0.29, 0.19),
+        ),
+        Team::Enemy => (
+            Color::srgb(0.42, 0.26, 0.22),
+            Color::srgb(0.35, 0.21, 0.18),
+        ),
+    };
+
+    let olive_mat = materials.add(StandardMaterial {
+        base_color: olive_color,
+        perceptual_roughness: 0.72,
+        metallic: 0.22,
+        ..default()
+    });
+    let shield_mat = materials.add(StandardMaterial {
+        base_color: shield_color,
+        perceptual_roughness: 0.76,
+        metallic: 0.26,
+        ..default()
+    });
+    let gunmetal_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.16, 0.18, 0.17),
+        perceptual_roughness: 0.48,
+        metallic: 0.65,
+        ..default()
+    });
+    let tire_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.11, 0.11, 0.12),
+        perceptual_roughness: 0.90,
+        metallic: 0.05,
+        ..default()
+    });
+    let dfcs_screen_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.62, 0.45),
+        unlit: true,
+        ..default()
+    });
+
+    // 1. Root entity: M119A3 circular firing platform / turntable baseplate on the ground
+    let platform_mesh = meshes.add(Cylinder::new(1.05, 0.14));
+    let artillery_entity = commands
+        .spawn((
+            LevelEntity,
+            FieldArtillery {
+                heading: forward,
+                ..default()
+            },
+            team,
+            Mesh3d(platform_mesh),
+            MeshMaterial3d(gunmetal_mat.clone()),
+            Transform::from_xyz(pos.x, 0.07, pos.y).with_rotation(Quat::from_rotation_y(yaw)),
+        ))
+        .id();
+
+    // 2. Carriage axle + two pneumatic road wheels + wheel hubs
+    let axle_mesh = meshes.add(Cuboid::new(2.35, 0.26, 0.44));
+    let wheel_tire_mesh = meshes.add(Cylinder::new(0.56, 0.30));
+    let wheel_hub_mesh = meshes.add(Cylinder::new(0.28, 0.34));
+    commands.spawn((
+        Mesh3d(axle_mesh),
+        MeshMaterial3d(olive_mat.clone()),
+        Transform::from_xyz(0.0, 0.45, 0.10),
+        ChildOf(artillery_entity),
+    ));
+    for side in [-1.0_f32, 1.0_f32] {
+        commands.spawn((
+            Mesh3d(wheel_tire_mesh.clone()),
+            MeshMaterial3d(tire_mat.clone()),
+            Transform::from_xyz(side * 1.28, 0.49, 0.10)
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+            ChildOf(artillery_entity),
+        ));
+        commands.spawn((
+            Mesh3d(wheel_hub_mesh.clone()),
+            MeshMaterial3d(olive_mat.clone()),
+            Transform::from_xyz(side * 1.28, 0.49, 0.10)
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+            ChildOf(artillery_entity),
+        ));
+    }
+
+    // 3. M119A3 single box trail extending rearward (`+Z`), rear stabilizer spades, and tow lunette
+    let trail_beam_mesh = meshes.add(Cuboid::new(0.46, 0.26, 3.10));
+    let rear_spade_mesh = meshes.add(Cuboid::new(1.60, 0.22, 0.56));
+    let lunette_ring_mesh = meshes.add(Cylinder::new(0.22, 0.10));
+    commands.spawn((
+        Mesh3d(trail_beam_mesh),
+        MeshMaterial3d(olive_mat.clone()),
+        Transform::from_xyz(0.0, 0.26, 1.65).with_rotation(Quat::from_rotation_x(-0.10)),
+        ChildOf(artillery_entity),
+    ));
+    commands.spawn((
+        Mesh3d(rear_spade_mesh),
+        MeshMaterial3d(gunmetal_mat.clone()),
+        Transform::from_xyz(0.0, 0.08, 3.15),
+        ChildOf(artillery_entity),
+    ));
+    commands.spawn((
+        Mesh3d(lunette_ring_mesh),
+        MeshMaterial3d(gunmetal_mat.clone()),
+        Transform::from_xyz(0.0, 0.14, 3.55),
+        ChildOf(artillery_entity),
+    ));
+
+    // 4. Upper carriage saddle, left/right sloped gun shields, and M119A3 Digital Fire Control unit
+    let saddle_mesh = meshes.add(Cuboid::new(0.88, 0.56, 0.95));
+    let shield_plate_mesh = meshes.add(Cuboid::new(0.62, 0.78, 0.12));
+    let dfcs_box_mesh = meshes.add(Cuboid::new(0.26, 0.24, 0.22));
+    commands.spawn((
+        Mesh3d(saddle_mesh),
+        MeshMaterial3d(olive_mat.clone()),
+        Transform::from_xyz(0.0, 0.72, 0.05),
+        ChildOf(artillery_entity),
+    ));
+    for side in [-1.0_f32, 1.0_f32] {
+        commands.spawn((
+            Mesh3d(shield_plate_mesh.clone()),
+            MeshMaterial3d(shield_mat.clone()),
+            Transform::from_xyz(side * 0.64, 0.86, -0.18)
+                .with_rotation(Quat::from_rotation_x(0.22)),
+            ChildOf(artillery_entity),
+        ));
+    }
+    commands.spawn((
+        Mesh3d(dfcs_box_mesh),
+        MeshMaterial3d(dfcs_screen_mat),
+        Transform::from_xyz(-0.56, 1.08, 0.08),
+        ChildOf(artillery_entity),
+    ));
+
+    // 5. Elevating recoil assembly + long M119A3 105mm L/30 barrel (`-Z` is forward, pitched up ~16°)
+    let breech_mesh = meshes.add(Cuboid::new(0.54, 0.44, 1.75));
+    let recuperator_mesh = meshes.add(Cylinder::new(0.14, 1.85));
+    let barrel_jacket_mesh = meshes.add(Cylinder::new(0.21, 1.45));
+    let long_barrel_mesh = meshes.add(Cylinder::new(0.15, ARTILLERY_BARREL_LENGTH));
+    let muzzle_collar_mesh = meshes.add(Cylinder::new(0.22, 0.44));
+
+    let barrel_entity = commands
+        .spawn((
+            ArtilleryBarrel {
+                artillery: artillery_entity,
+            },
+            Mesh3d(breech_mesh),
+            MeshMaterial3d(gunmetal_mat.clone()),
+            Transform::from_xyz(0.0, 0.98, 0.05).with_rotation(Quat::from_rotation_x(0.28)),
+            ChildOf(artillery_entity),
+        ))
+        .id();
+
+    // Hydro-pneumatic recoil recuperator cylinder above the breech
+    commands.spawn((
+        Mesh3d(recuperator_mesh),
+        MeshMaterial3d(olive_mat.clone()),
+        Transform::from_xyz(0.0, 0.28, -0.25).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+        ChildOf(barrel_entity),
+    ));
+    // Stepped barrel cradle jacket
+    commands.spawn((
+        Mesh3d(barrel_jacket_mesh),
+        MeshMaterial3d(olive_mat),
+        Transform::from_xyz(0.0, 0.04, -1.05).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+        ChildOf(barrel_entity),
+    ));
+    // Long 105mm howitzer tube extending forward along `-Z`
+    commands.spawn((
+        Mesh3d(long_barrel_mesh),
+        MeshMaterial3d(gunmetal_mat.clone()),
+        Transform::from_xyz(0.0, 0.04, -2.55).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+        ChildOf(barrel_entity),
+    ));
+    // M119A3 muzzle brake / collar at the barrel tip
+    commands.spawn((
+        Mesh3d(muzzle_collar_mesh),
+        MeshMaterial3d(gunmetal_mat),
+        Transform::from_xyz(0.0, 0.04, -5.20).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+        ChildOf(barrel_entity),
+    ));
+
+    (artillery_entity, barrel_entity)
+}
+
+/// Spawns the friendly APC, friendly Attack Helicopter, and friendly M119A3 Field Artillery in `test_level_4`.
 pub fn setup_level_vehicles(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1004,6 +1302,15 @@ pub fn setup_level_vehicles(
         Team::Player,
         LEVEL_4_FRIENDLY_HELICOPTER_SPAWN_POS,
         LEVEL_4_FRIENDLY_HELICOPTER_FACING,
+    );
+
+    spawn_field_artillery(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        Team::Player,
+        LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS,
+        LEVEL_4_FRIENDLY_ARTILLERY_FACING,
     );
 }
 
@@ -1559,6 +1866,336 @@ pub fn update_attack_helicopters(
             let local_tilt = Quat::from_rotation_x(pitch) * Quat::from_rotation_z(roll);
             cannon_tf.rotation =
                 local_tilt.inverse() * Quat::from_rotation_y(heli.cannon_yaw_local);
+        }
+    }
+}
+
+/// Updates every stationary `FieldArtillery` emplacement, its barrel recoil animation, in-flight
+/// `ArtilleryShell`s, and medium-circle `ArtilleryExplosion`s on impact:
+/// 1. When a friendly Squad Leader calls for support (`SquadLeaderDecision::FixAndSupport { target_center }`),
+///    provides `target_center` coordinates to friendly `FieldArtillery` batteries.
+/// 2. Rotates the stationary artillery piece very slowly on its central vertical axis (`rotation_speed_rad`)
+///    toward `target_coords`.
+/// 3. Once aligned within its full-map firing range (`firing_range`) and reloaded (`reload_timer`),
+///    fires a 105mm HE `ArtilleryShell` from the muzzle of the long M119A3 barrel.
+/// 4. On impact at `target_pos`, the shell explodes in a medium circle (`blast_radius`), eliminating
+///    soldiers inside the blast circle, heavily suppressing nearby troops, and spawning a visible
+///    medium-circle explosion and crater decal.
+pub fn update_field_artillery(
+    mut commands: Commands,
+    time: Res<Time>,
+    squad_doctrine: Option<Res<crate::friendly::SquadDoctrineState>>,
+    mut meshes: Option<ResMut<Assets<Mesh>>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    corpse_assets: Option<Res<CorpseAssets>>,
+    mut gunshot_writer: MessageWriter<GunshotEvent>,
+    mut artillery_query: Query<
+        (&Team, &mut FieldArtillery, &mut Transform),
+        (
+            Without<ArtilleryBarrel>,
+            Without<ArtilleryShell>,
+            Without<ArtilleryExplosion>,
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut barrel_query: Query<
+        (&ArtilleryBarrel, &mut Transform),
+        (
+            Without<FieldArtillery>,
+            Without<ArtilleryShell>,
+            Without<ArtilleryExplosion>,
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut shell_query: Query<
+        (Entity, &mut ArtilleryShell, &mut Transform),
+        (
+            Without<FieldArtillery>,
+            Without<ArtilleryBarrel>,
+            Without<ArtilleryExplosion>,
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut explosion_query: Query<
+        (Entity, &mut ArtilleryExplosion, &mut Transform),
+        (
+            Without<FieldArtillery>,
+            Without<ArtilleryBarrel>,
+            Without<ArtilleryShell>,
+            Without<AttackHelicopter>,
+            Without<HelicopterMainRotor>,
+            Without<HelicopterTailRotor>,
+            Without<HelicopterAutocannon>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<Soldier>,
+            Without<MountedInVehicle>,
+            Without<Building>,
+            Without<LowWall>,
+        ),
+    >,
+    mut soldiers_q: Query<
+        (Entity, &Transform, &Team, &Soldier, &mut Suppression),
+        (
+            Without<FieldArtillery>,
+            Without<ArtilleryBarrel>,
+            Without<ArtilleryShell>,
+            Without<ArtilleryExplosion>,
+            Without<MountedInVehicle>,
+        ),
+    >,
+) {
+    let dt = time.delta_secs();
+    let sl_support_coords = squad_doctrine
+        .as_deref()
+        .and_then(|d| d.active_support_coordinates());
+
+    // 1. Update each stationary FieldArtillery piece: receive Squad Leader coordinates, rotate very slowly on axis, and fire
+    for (v_team, mut artillery, mut art_tf) in &mut artillery_query {
+        artillery.reload_timer.tick(time.delta());
+        if artillery.recoil_offset > 0.0 {
+            artillery.recoil_offset = (artillery.recoil_offset - 1.2 * dt).max(0.0);
+        }
+
+        if *v_team == Team::Player {
+            if let Some(coords) = sl_support_coords {
+                artillery.target_coords = Some(coords);
+                artillery.called_by_squad_leader = true;
+            } else if artillery.called_by_squad_leader {
+                artillery.target_coords = None;
+                artillery.called_by_squad_leader = false;
+            }
+        }
+
+        let artillery_pos = Vec2::new(art_tf.translation.x, art_tf.translation.z);
+        let current_fwd = artillery
+            .heading
+            .normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
+        let current_yaw = f32::atan2(-current_fwd.x, -current_fwd.y);
+
+        if let Some(target_pos) = artillery.target_coords {
+            let to_target = target_pos - artillery_pos;
+            let dist = to_target.length();
+            if dist >= 1.0 && dist <= artillery.firing_range {
+                let desired_dir = to_target / dist;
+                let target_yaw = f32::atan2(-desired_dir.x, -desired_dir.y);
+                let mut yaw_diff = target_yaw - current_yaw;
+                while yaw_diff > std::f32::consts::PI {
+                    yaw_diff -= std::f32::consts::TAU;
+                }
+                while yaw_diff < -std::f32::consts::PI {
+                    yaw_diff += std::f32::consts::TAU;
+                }
+
+                // Rotate on central axis very slowly (`artillery.rotation_speed_rad`)
+                let max_yaw_step = artillery.rotation_speed_rad * dt;
+                let new_yaw = if yaw_diff.abs() <= max_yaw_step {
+                    target_yaw
+                } else {
+                    current_yaw + yaw_diff.signum() * max_yaw_step
+                };
+                artillery.heading = Vec2::new(-new_yaw.sin(), -new_yaw.cos())
+                    .normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
+                art_tf.rotation = Quat::from_rotation_y(new_yaw);
+
+                let remaining_yaw_err = (target_yaw - new_yaw).abs();
+                if remaining_yaw_err <= 0.05 && artillery.reload_timer.is_finished() {
+                    artillery.reload_timer =
+                        Timer::from_seconds(ARTILLERY_RELOAD_SECS, TimerMode::Once);
+                    artillery.recoil_offset = 0.65;
+
+                    let muzzle_pos = artillery.muzzle_world_pos(artillery_pos);
+                    let flight_dist = (target_pos - muzzle_pos).length().max(0.5);
+
+                    let mut shell_cmd = commands.spawn((
+                        LevelEntity,
+                        Transform::from_xyz(muzzle_pos.x, 1.45, muzzle_pos.y)
+                            .with_rotation(Quat::from_rotation_y(new_yaw)),
+                        ArtilleryShell {
+                            origin: muzzle_pos,
+                            target_pos,
+                            speed: ARTILLERY_SHELL_SPEED,
+                            total_distance: flight_dist,
+                            traveled_distance: 0.0,
+                            blast_radius: ARTILLERY_BLAST_RADIUS,
+                            team: *v_team,
+                        },
+                    ));
+                    if let (Some(ref mut m_assets), Some(ref mut mat_assets)) =
+                        (meshes.as_deref_mut(), materials.as_deref_mut())
+                    {
+                        let shell_mesh = m_assets.add(Cylinder::new(0.14, 0.72));
+                        let shell_mat = mat_assets.add(StandardMaterial {
+                            base_color: Color::srgb(0.95, 0.78, 0.25),
+                            unlit: true,
+                            ..default()
+                        });
+                        shell_cmd.insert((Mesh3d(shell_mesh), MeshMaterial3d(shell_mat)));
+                    }
+
+                    gunshot_writer.write(GunshotEvent {
+                        position: muzzle_pos,
+                        shooter_team: *v_team,
+                    });
+                }
+            }
+        } else {
+            art_tf.rotation = Quat::from_rotation_y(current_yaw);
+        }
+    }
+
+    // 2. Animate hydro-pneumatic recoil on the M119A3 barrel assembly
+    for (barrel, mut barrel_tf) in &mut barrel_query {
+        if let Ok((_, artillery, _)) = artillery_query.get(barrel.artillery) {
+            barrel_tf.translation = Vec3::new(0.0, 0.98, 0.05 + artillery.recoil_offset);
+        }
+    }
+
+    // 3. Advance in-flight ArtilleryShells along their parabolic trajectory and detonate in a medium circle on impact
+    for (shell_entity, mut shell, mut shell_tf) in &mut shell_query {
+        shell.traveled_distance += shell.speed * dt;
+        let t = (shell.traveled_distance / shell.total_distance.max(0.1)).clamp(0.0, 1.0);
+        let ground_pos = shell.origin.lerp(shell.target_pos, t);
+        let arc_height = 1.45 + 24.0 * 4.0 * t * (1.0 - t);
+        let flight_dir = (shell.target_pos - shell.origin).normalize_or(Vec2::new(0.0, -1.0));
+        let flight_yaw = f32::atan2(-flight_dir.x, -flight_dir.y);
+        shell_tf.translation = Vec3::new(ground_pos.x, arc_height, ground_pos.y);
+        shell_tf.rotation =
+            Quat::from_rotation_y(flight_yaw) * Quat::from_rotation_x(-FRAC_PI_2);
+
+        if shell.traveled_distance >= shell.total_distance {
+            let impact_pos = shell.target_pos;
+            let blast_r = shell.blast_radius;
+            let blast_r_sq = blast_r * blast_r;
+            let suppress_r_sq = (blast_r * 2.0) * (blast_r * 2.0);
+
+            // Spawn medium-circle explosion visual effect + scorched crater decal at `impact_pos`
+            let mut exp_cmd = commands.spawn((
+                LevelEntity,
+                NotShadowCaster,
+                NotShadowReceiver,
+                Transform::from_xyz(impact_pos.x, 0.14, impact_pos.y)
+                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2))
+                    .with_scale(Vec3::splat(0.35)),
+                ArtilleryExplosion {
+                    timer: Timer::from_seconds(0.65, TimerMode::Once),
+                    blast_radius: blast_r,
+                },
+            ));
+            if let (Some(ref mut m_assets), Some(ref mut mat_assets)) =
+                (meshes.as_deref_mut(), materials.as_deref_mut())
+            {
+                let blast_circle_mesh = m_assets.add(Circle::new(1.0));
+                let blast_mat = mat_assets.add(StandardMaterial {
+                    base_color: Color::srgba(1.0, 0.52, 0.12, 0.68),
+                    alpha_mode: AlphaMode::Blend,
+                    unlit: true,
+                    cull_mode: None,
+                    ..default()
+                });
+                exp_cmd.insert((Mesh3d(blast_circle_mesh), MeshMaterial3d(blast_mat)));
+
+                let crater_mesh = m_assets.add(Circle::new(blast_r * 0.52));
+                let crater_mat = mat_assets.add(StandardMaterial {
+                    base_color: Color::srgba(0.14, 0.13, 0.11, 0.85),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 0.98,
+                    ..default()
+                });
+                commands.spawn((
+                    LevelEntity,
+                    NotShadowCaster,
+                    Mesh3d(crater_mesh),
+                    MeshMaterial3d(crater_mat),
+                    Transform::from_xyz(impact_pos.x, 0.018, impact_pos.y)
+                        .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                ));
+            }
+
+            // Apply lethal AoE damage within the medium circle (`blast_r`) and heavy suppression nearby
+            for (s_entity, s_tf, s_team, _, mut suppression) in &mut soldiers_q {
+                let s_pos = Vec2::new(s_tf.translation.x, s_tf.translation.z);
+                let dist_sq = (s_pos - impact_pos).length_squared();
+                if dist_sq <= blast_r_sq {
+                    let mut entity_cmds = commands.entity(s_entity);
+                    entity_cmds.despawn_children();
+                    entity_cmds
+                        .remove::<Soldier>()
+                        .remove::<Team>()
+                        .remove::<Player>()
+                        .remove::<Enemy>()
+                        .remove::<Friendly>()
+                        .remove::<Zombie>()
+                        .insert((
+                            Corpse,
+                            Visibility::Inherited,
+                            Transform::from_xyz(s_pos.x, 0.03, s_pos.y)
+                                .with_rotation(s_tf.rotation)
+                                .with_scale(Vec3::new(0.65, 0.95, 0.65)),
+                        ));
+                    if let Some(ref c_assets) = corpse_assets {
+                        entity_cmds.insert(MeshMaterial3d(if *s_team == Team::Player {
+                            c_assets.player_corpse_material.clone()
+                        } else {
+                            c_assets.enemy_corpse_material.clone()
+                        }));
+                        commands.spawn((
+                            LevelEntity,
+                            Mesh3d(c_assets.blood_pool_mesh.clone()),
+                            MeshMaterial3d(c_assets.blood_material.clone()),
+                            Transform::from_xyz(s_pos.x, 0.015, s_pos.y)
+                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                            BloodDecal,
+                        ));
+                    }
+                } else if dist_sq <= suppress_r_sq {
+                    suppression.add(1.0);
+                }
+            }
+
+            gunshot_writer.write(GunshotEvent {
+                position: impact_pos,
+                shooter_team: shell.team,
+            });
+            commands.entity(shell_entity).despawn();
+        }
+    }
+
+    // 4. Expand and fade medium-circle ArtilleryExplosions
+    for (exp_entity, mut exp, mut exp_tf) in &mut explosion_query {
+        exp.timer.tick(time.delta());
+        let frac = exp.timer.fraction();
+        let radius_scale = exp.blast_radius * (0.35 + 0.65 * frac);
+        exp_tf.scale = Vec3::splat(radius_scale);
+        if exp.timer.is_finished() {
+            commands.entity(exp_entity).despawn();
         }
     }
 }
@@ -2497,6 +3134,7 @@ mod tests {
             player_material,
             enemy_material,
         });
+        app.init_resource::<crate::friendly::SquadDoctrineState>();
         app.add_systems(
             Update,
             (
@@ -2505,6 +3143,7 @@ mod tests {
                 update_dismounted_crew_return,
                 resolve_soldier_apc_collisions,
                 update_attack_helicopters,
+                update_field_artillery,
             )
                 .chain(),
         );
@@ -3320,6 +3959,235 @@ mod tests {
             "Helicopter should fly forward nose-first (forward_speed={:.2}) without diagonal strafing (strafe_speed={:.2})",
             heli.forward_speed,
             heli.strafe_speed
+        );
+    }
+
+    #[test]
+    fn test_level_4_spawns_friendly_m119a3_field_artillery_with_long_barrel() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let (art_entity, art_tf, team, artillery) = app
+            .world_mut()
+            .query::<(Entity, &Transform, &Team, &FieldArtillery)>()
+            .single(app.world())
+            .expect("Level 4 should spawn 1 friendly M119A3 FieldArtillery piece");
+
+        assert_eq!(*team, Team::Player);
+        assert!(
+            (art_tf.translation.x - LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS.x).abs() < 0.1
+                && (art_tf.translation.z - LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS.y).abs() < 0.1,
+            "FieldArtillery should spawn at LEVEL_4_FRIENDLY_ARTILLERY_SPAWN_POS, got {:?}",
+            art_tf.translation
+        );
+        assert!(
+            artillery.firing_range >= crate::common::types::RTS_WORLD_SIZE,
+            "FieldArtillery firing range ({}) must cover the entire map ({})",
+            artillery.firing_range,
+            crate::common::types::RTS_WORLD_SIZE
+        );
+        assert!(
+            artillery.rotation_speed_rad <= 0.8,
+            "FieldArtillery must rotate very slowly on its axis (got {} rad/s)",
+            artillery.rotation_speed_rad
+        );
+
+        let barrel = app
+            .world_mut()
+            .query::<&ArtilleryBarrel>()
+            .single(app.world())
+            .expect("FieldArtillery must have an ArtilleryBarrel child assembly");
+        assert_eq!(barrel.artillery, art_entity);
+    }
+
+    #[test]
+    fn test_field_artillery_rotates_slowly_and_fires_across_entire_map_exploding_in_medium_circle_when_squad_leader_calls_support() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let art_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<FieldArtillery>>()
+            .single(app.world())
+            .unwrap();
+        let initial_art_pos = {
+            let tf = app.world().get::<Transform>(art_entity).unwrap();
+            Vec2::new(tf.translation.x, tf.translation.z)
+        };
+
+        // Distant target coordinates far across the map (~550m away to the Northwest)
+        let support_coords = Vec2::new(-180.0, -310.0);
+
+        // Spawn two enemies inside the medium explosion circle (`<= ARTILLERY_BLAST_RADIUS = 7.5m`)
+        // and one enemy well outside the blast circle (`25m` away)
+        let enemy_center = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(support_coords.x + 2.0, 0.05, support_coords.y - 1.5),
+                Team::Enemy,
+                Enemy {
+                    state: crate::enemy::ai::EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: support_coords,
+                },
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+                Suppression::default(),
+            ))
+            .id();
+        let enemy_edge = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(support_coords.x - 5.5, 0.05, support_coords.y + 3.0),
+                Team::Enemy,
+                Enemy {
+                    state: crate::enemy::ai::EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: support_coords,
+                },
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+                Suppression::default(),
+            ))
+            .id();
+        let enemy_outside = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(support_coords.x + 25.0, 0.05, support_coords.y),
+                Team::Enemy,
+                Enemy {
+                    state: crate::enemy::ai::EnemyAiState::Search,
+                    current_waypoint_idx: 0,
+                    last_known_player_pos: None,
+                    investigate_timer: Timer::from_seconds(3.0, TimerMode::Once),
+                    shoot_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                    speed: 5.5,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    stuck_timer: 0.0,
+                    last_pos: support_coords,
+                },
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+                Suppression::default(),
+            ))
+            .id();
+
+        // Squad Leader calls for support and provides `support_coords`
+        {
+            let mut doctrine = app
+                .world_mut()
+                .resource_mut::<crate::friendly::SquadDoctrineState>();
+            doctrine.entry_mut(0).phase =
+                crate::friendly::SquadTacticalPhase::DecisionActive(
+                    crate::friendly::SquadLeaderDecision::FixAndSupport {
+                        target_center: support_coords,
+                    },
+                );
+        }
+
+        // 1. After 0.25s (5 ticks), the artillery should still be rotating very slowly on its axis
+        //    (has not yet reached alignment and has not fired yet) and must remain stationary
+        for _ in 0..5 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+        let early_shells = app
+            .world_mut()
+            .query::<&ArtilleryShell>()
+            .iter(app.world())
+            .count();
+        assert_eq!(
+            early_shells, 0,
+            "FieldArtillery should rotate very slowly on its axis before it can align and fire"
+        );
+
+        // 2. Continue advancing until the artillery finishes rotating onto target, fires a shell,
+        //    and the shell travels across the map and explodes at `support_coords`
+        let mut saw_shell_in_flight = false;
+        let mut saw_explosion = false;
+        for _ in 0..220 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+
+            if app
+                .world_mut()
+                .query::<&ArtilleryShell>()
+                .iter(app.world())
+                .next()
+                .is_some()
+            {
+                saw_shell_in_flight = true;
+            }
+            if app
+                .world_mut()
+                .query::<&ArtilleryExplosion>()
+                .iter(app.world())
+                .next()
+                .is_some()
+            {
+                saw_explosion = true;
+            }
+        }
+
+        let final_art_pos = {
+            let tf = app.world().get::<Transform>(art_entity).unwrap();
+            Vec2::new(tf.translation.x, tf.translation.z)
+        };
+        assert!(
+            (final_art_pos - initial_art_pos).length() < 1e-4,
+            "FieldArtillery must remain stationary on its emplacement"
+        );
+        assert!(
+            saw_shell_in_flight,
+            "FieldArtillery should fire an ArtilleryShell once rotated onto the Squad Leader's support coordinates"
+        );
+        assert!(
+            saw_explosion,
+            "ArtilleryShell should detonate in a medium-circle ArtilleryExplosion on impact"
+        );
+        assert!(
+            app.world().get::<Corpse>(enemy_center).is_some()
+                && app.world().get::<Corpse>(enemy_edge).is_some(),
+            "Both enemies inside the medium explosion circle (radius {:.1}m) must be eliminated on impact",
+            ARTILLERY_BLAST_RADIUS
+        );
+        assert!(
+            app.world().get::<Soldier>(enemy_outside).is_some(),
+            "Enemy well outside the medium blast circle (25m away) should survive"
         );
     }
 }
