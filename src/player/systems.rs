@@ -4,7 +4,7 @@ use crate::common::geometry::{
     resolve_circle_circle_collision, resolve_circle_obstacle_collision,
 };
 use crate::common::types::{
-    GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, SquadCommand, Stance, Team,
+    CurrentLevel, GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, SquadCommand, Stance, Team,
 };
 use crate::world::buildings::{BuildingCollider, LowWallCollider};
 use bevy::prelude::*;
@@ -17,7 +17,11 @@ pub fn setup_player(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    current_level: Option<Res<CurrentLevel>>,
 ) {
+    if current_level.as_deref().copied().unwrap_or_default() == CurrentLevel::Level4 {
+        return;
+    }
     let pointer_mesh = meshes.add(Circle::new(0.15));
     let player_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));
     let player_soldier_material = materials.add(StandardMaterial {

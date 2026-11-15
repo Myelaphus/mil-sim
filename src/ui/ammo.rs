@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::common::types::{LevelEntity, Soldier, SquadCommand, MAG_CAPACITY};
+use crate::common::types::{CurrentLevel, LevelEntity, Soldier, SquadCommand, MAG_CAPACITY};
 use crate::player::Player;
 
 #[derive(Component)]
@@ -30,7 +30,13 @@ pub struct ReloadProgressBar;
 pub struct ReloadProgressBarContainer;
 
 // Spawns clean tactical HUD element in bottom-right corner for ammo, magazines, and reload status
-pub fn setup_ammo_ui(mut commands: Commands) {
+pub fn setup_ammo_ui(
+    mut commands: Commands,
+    current_level: Option<Res<CurrentLevel>>,
+) {
+    if current_level.as_deref().copied().unwrap_or_default() == CurrentLevel::Level4 {
+        return;
+    }
     commands
         .spawn((
             AmmoHudRoot,

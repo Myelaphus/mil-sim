@@ -16,6 +16,9 @@ pub struct TestLevel2Button;
 pub struct TestLevel3Button;
 
 #[derive(Component)]
+pub struct TestLevel4Button;
+
+#[derive(Component)]
 pub struct LevelOutcomeBanner;
 
 #[derive(Resource, Default)]
@@ -215,6 +218,44 @@ pub fn setup_main_menu(mut commands: Commands) {
                         },
                         TextColor(Color::srgb(0.70, 0.56, 0.35)),
                     ));
+
+                    // Button: test_level_4 (Combined Arms RTS Map)
+                    section
+                        .spawn((
+                            Button,
+                            TestLevel4Button,
+                            Node {
+                                width: Val::Px(360.0),
+                                height: Val::Px(56.0),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border: UiRect::all(Val::Px(1.5)),
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                margin: UiRect::top(Val::Px(6.0)),
+                                ..default()
+                            },
+                            BackgroundColor(BUTTON_NORMAL),
+                            BorderColor::all(Color::srgb(0.45, 0.32, 0.62)),
+                        ))
+                        .with_children(|btn| {
+                            btn.spawn((
+                                Text::new("▶  test_level_4"),
+                                TextFont {
+                                    font_size: FontSize::Px(20.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.78, 0.62, 1.0)),
+                            ));
+                        });
+
+                    section.spawn((
+                        Text::new("Combined Arms RTS Map • Open Field, Central Village (10 Buildings) & N-S Road"),
+                        TextFont {
+                            font_size: FontSize::Px(12.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.62, 0.52, 0.78)),
+                    ));
                 });
 
             // Tactical Briefing & Controls Card
@@ -286,6 +327,7 @@ pub fn update_main_menu_interactions(
             With<TestLevel1Button>,
             Without<TestLevel2Button>,
             Without<TestLevel3Button>,
+            Without<TestLevel4Button>,
         ),
     >,
     mut level2_q: Query<
@@ -295,6 +337,7 @@ pub fn update_main_menu_interactions(
             With<TestLevel2Button>,
             Without<TestLevel1Button>,
             Without<TestLevel3Button>,
+            Without<TestLevel4Button>,
         ),
     >,
     mut level3_q: Query<
@@ -304,6 +347,17 @@ pub fn update_main_menu_interactions(
             With<TestLevel3Button>,
             Without<TestLevel1Button>,
             Without<TestLevel2Button>,
+            Without<TestLevel4Button>,
+        ),
+    >,
+    mut level4_q: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (
+            Changed<Interaction>,
+            With<TestLevel4Button>,
+            Without<TestLevel1Button>,
+            Without<TestLevel2Button>,
+            Without<TestLevel3Button>,
         ),
     >,
 ) {
@@ -363,6 +417,25 @@ pub fn update_main_menu_interactions(
             }
         }
     }
+
+    for (interaction, mut bg_color, mut border_color) in &mut level4_q {
+        match *interaction {
+            Interaction::Pressed => {
+                *bg_color = Color::srgb(0.38, 0.24, 0.58).into();
+                *border_color = BorderColor::all(Color::srgb(0.78, 0.62, 1.0));
+                *current_level = CurrentLevel::Level4;
+                next_state.set(AppState::InGame);
+            }
+            Interaction::Hovered => {
+                *bg_color = Color::srgb(0.24, 0.18, 0.36).into();
+                *border_color = BorderColor::all(Color::srgb(0.58, 0.44, 0.80));
+            }
+            Interaction::None => {
+                *bg_color = BUTTON_NORMAL.into();
+                *border_color = BorderColor::all(Color::srgb(0.45, 0.32, 0.62));
+            }
+        }
+    }
 }
 
 // Despawns Main Menu UI when transitioning to InGame
@@ -380,6 +453,7 @@ pub fn check_level_end_conditions(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<AppState>>,
     mut level_end: ResMut<LevelEndManager>,
+    current_level: Option<Res<CurrentLevel>>,
     player_q: Query<Entity, With<Player>>,
     enemy_q: Query<Entity, With<Enemy>>,
     banner_q: Query<Entity, With<LevelOutcomeBanner>>,
@@ -389,6 +463,11 @@ pub fn check_level_end_conditions(
         level_end.timer = None;
         level_end.outcome = None;
         next_state.set(AppState::MainMenu);
+        return;
+    }
+
+    // test_level_4 is an RTS sandbox map without player/enemy soldier units yet
+    if current_level.as_deref().copied() == Some(CurrentLevel::Level4) {
         return;
     }
 
@@ -591,6 +670,58 @@ mod tests {
 
         let bg_color = app.world().get::<BackgroundColor>(button_entity).unwrap();
         assert_eq!(bg_color.0, Color::srgb(0.55, 0.38, 0.14));
+    }
+
+    #[test]
+    fn test_menu_button_interaction_launches_level_4() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<AppState>();
+        app.init_resource::<CurrentLevel>();
+
+        let button_entity = app
+            .world_mut()
+            .spawn((
+                Button,
+                TestLevel4Button,
+                Interaction::Pressed,
+                BackgroundColor(BUTTON_NORMAL),
+                BorderColor::all(Color::srgb(0.2, 0.3, 0.4)),
+            ))
+            .id();
+
+        app.add_systems(Update, update_main_menu_interactions);
+        app.update(); // Processes interaction, sets next_state
+        app.update(); // Applies StateTransition schedule
+
+        let state = app.world().resource::<State<AppState>>();
+        assert_eq!(*state.get(), AppState::InGame);
+
+        let current_lvl = app.world().resource::<CurrentLevel>();
+        assert_eq!(*current_lvl, CurrentLevel::Level4);
+
+        let bg_color = app.world().get::<BackgroundColor>(button_entity).unwrap();
+        assert_eq!(bg_color.0, Color::srgb(0.38, 0.24, 0.58));
+    }
+
+    #[test]
+    fn test_level_4_does_not_trigger_defeat_without_units() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.insert_state(AppState::InGame);
+        app.insert_resource(CurrentLevel::Level4);
+        app.init_resource::<Time>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<LevelEndManager>();
+
+        app.add_systems(Update, check_level_end_conditions);
+        app.update();
+
+        let level_end = app.world().resource::<LevelEndManager>();
+        assert!(
+            level_end.outcome.is_none(),
+            "test_level_4 has no units yet and must not trigger Defeat or Victory"
+        );
     }
 
     #[test]

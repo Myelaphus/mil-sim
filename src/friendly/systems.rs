@@ -5,7 +5,8 @@ use crate::common::geometry::{
     has_low_wall_in_line_of_fire, is_near_low_wall, resolve_circle_obstacle_collision,
 };
 use crate::common::types::{
-    GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, SquadCommand, Stance, Suppression, Team,
+    CurrentLevel, GunshotEvent, LevelEntity, SOLDIER_RADIUS, Soldier, SquadCommand, Stance,
+    Suppression, Team,
 };
 use crate::enemy::ai::Enemy;
 use crate::fog::mesh::create_vision_cone_mesh;
@@ -77,9 +78,13 @@ pub fn setup_friendly(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut squad_command: Option<ResMut<SquadCommand>>,
+    current_level: Option<Res<CurrentLevel>>,
 ) {
     if let Some(ref mut cmd) = squad_command {
         **cmd = SquadCommand::Formation;
+    }
+    if current_level.as_deref().copied().unwrap_or_default() == CurrentLevel::Level4 {
+        return;
     }
     let pointer_mesh = meshes.add(Circle::new(0.15));
     let friendly_soldier_mesh = meshes.add(Circle::new(SOLDIER_RADIUS));

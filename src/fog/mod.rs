@@ -23,6 +23,9 @@ fn setup_fog(
     current_level: Option<Res<CurrentLevel>>,
 ) {
     let level = current_level.as_deref().copied().unwrap_or_default();
+    if level == CurrentLevel::Level4 {
+        return;
+    }
     let mut building_boxes = [Vec4::ZERO; 16];
     let building_count = if level == CurrentLevel::Level3 {
         0

@@ -16,6 +16,9 @@ pub struct LowWallCollider {
     pub half_size: Vec2,
 }
 
+#[derive(Component)]
+pub struct Road;
+
 // 11 Buildings in an expanded realistic military base layout (120x120 world)
 pub const COMPOUND_BUILDINGS: [(Vec3, Vec3); 11] = [
     // --- North Sector: Command & Communications ---
@@ -84,4 +87,30 @@ pub const COURTYARD_LOW_WALLS: [(Vec3, Vec3); 4] = [
     // East courtyard wall
     (Vec3::new(1.0, 0.75, 15.0), Vec3::new(8.0, 0.375, 0.0)),
 ];
+
+// 10 Buildings forming a small central village along the North-South road (X = 0) for test_level_4.
+// Clustered near the center of the 1200m x 1200m combined-arms map with clear road passage along X in [-4, 4].
+pub const VILLAGE_BUILDINGS: [(Vec3, Vec3); 10] = [
+    // 1. North-West Farmhouse
+    (Vec3::new(10.0, 3.0, 8.0), Vec3::new(-16.0, 1.5, -55.0)),
+    // 2. North-East General Store
+    (Vec3::new(12.0, 3.2, 9.0), Vec3::new(17.0, 1.6, -50.0)),
+    // 3. West Roadside Cottage
+    (Vec3::new(8.0, 2.8, 8.0), Vec3::new(-14.0, 1.4, -26.0)),
+    // 4. East Village Hall / Clinic
+    (Vec3::new(14.0, 3.5, 10.0), Vec3::new(18.0, 1.75, -20.0)),
+    // 5. West Barn / Outbuilding
+    (Vec3::new(14.0, 3.4, 10.0), Vec3::new(-34.0, 1.7, -8.0)),
+    // 6. Central-West Bakery / Shop
+    (Vec3::new(9.0, 3.0, 11.0), Vec3::new(-14.0, 1.5, 2.0)),
+    // 7. Central-East Tavern / Inn
+    (Vec3::new(11.0, 3.2, 12.0), Vec3::new(16.0, 1.6, 8.0)),
+    // 8. East Workshop / Garage
+    (Vec3::new(12.0, 3.0, 9.0), Vec3::new(36.0, 1.5, 22.0)),
+    // 9. South-West Residence
+    (Vec3::new(10.0, 2.8, 8.0), Vec3::new(-15.0, 1.4, 34.0)),
+    // 10. South-East Mill / Warehouse
+    (Vec3::new(13.0, 3.2, 10.0), Vec3::new(18.0, 1.6, 42.0)),
+];
+
 

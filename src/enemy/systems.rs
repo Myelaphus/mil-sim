@@ -52,6 +52,9 @@ pub fn setup_enemy(
         CurrentLevel::Level3 => {
             setup_courtyard_fireteam(&mut commands, &mut meshes, &mut materials);
         }
+        CurrentLevel::Level4 => {
+            // RTS level starts with map and camera controls only (no enemy units yet)
+        }
     }
 }
 

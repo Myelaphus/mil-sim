@@ -4,6 +4,11 @@ use bevy::prelude::*;
 pub const WORLD_SIZE: f32 = 120.0;
 pub const WORLD_HALF_SIZE: f32 = WORLD_SIZE * 0.5;
 
+// Large combined-arms RTS map dimensions for test_level_4 (1.2km x 1.2km)
+pub const RTS_WORLD_SIZE: f32 = 1200.0;
+pub const RTS_WORLD_HALF_SIZE: f32 = RTS_WORLD_SIZE * 0.5;
+pub const RTS_ROAD_WIDTH: f32 = 8.0;
+
 pub const SOLDIER_RADIUS: f32 = 0.6;
 pub const BULLET_RADIUS: f32 = 0.14;
 
@@ -23,6 +28,7 @@ pub enum CurrentLevel {
     Level1,
     Level2,
     Level3,
+    Level4,
 }
 
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
