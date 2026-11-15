@@ -1,5 +1,3 @@
-apc model
-apc combat and AI
 infantry loading and unloading into apc
 tank model
 tank combat and AI

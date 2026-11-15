@@ -1,12 +1,16 @@
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
-use crate::common::geometry::resolve_circle_obstacle_collision_bounded;
+use crate::combat::bullet::{Bullet, BulletAssets, CorpseAssets};
+use crate::common::geometry::{can_see_target, resolve_circle_obstacle_collision_bounded};
 use crate::common::types::{
-    ApcOrder, AppState, CommanderOrder, CurrentLevel, LevelEntity, RTS_SOLDIER_WORLD_BOUND,
-    SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance, Suppression, Team,
+    ApcOrder, AppState, BloodDecal, CommanderOrder, Corpse, CurrentLevel, GunshotEvent,
+    LevelEntity, RTS_SOLDIER_WORLD_BOUND, SOLDIER_RADIUS, SOLDIER_WORLD_BOUND, Soldier, Stance,
+    Suppression, Team,
 };
+use crate::enemy::ai::{Enemy, Zombie};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::friendly::{Friendly, FriendlyAiState};
+use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
 
 /// Realistic scale constants for the Armored Personnel Carrier (APC) (8x8 IFV/Stryker-class):
@@ -21,6 +25,16 @@ pub const APC_TURRET_RADIUS: f32 = 1.15;
 pub const APC_TURRET_HEIGHT: f32 = 0.65;
 pub const APC_BARREL_LENGTH: f32 = 2.4;
 pub const APC_BARREL_WIDTH: f32 = 0.22;
+
+/// Minimum lateral clearance radius required for an APC to pass safely between obstacles:
+/// `APC_HULL_WIDTH * 0.5 + 0.35 = 2.05m` radius (`4.10m` minimum passable gap width).
+/// Any gap narrower than `4.10m` (which infantry at `1.2m` diameter can easily walk through)
+/// is recognized as too small for the APC to pass.
+pub const APC_CLEARANCE_RADIUS: f32 = APC_HULL_WIDTH * 0.5 + 0.35;
+
+/// Minimum APC speed (`m/s`) at which colliding with an on-foot soldier is lethal, killing the
+/// soldier on impact and allowing the APC to drive directly through them.
+pub const APC_LETHAL_IMPACT_SPEED: f32 = 4.2;
 
 /// Default spawn position for the friendly APC on the road south of the infantry squad in `test_level_4`.
 pub const LEVEL_4_FRIENDLY_APC_SPAWN_POS: Vec2 = Vec2::new(0.0, 202.0);
@@ -78,6 +92,9 @@ pub struct ApcVehicle {
     pub turret_yaw_local: f32,
     pub turret_target_yaw_local: f32,
     pub turret_turn_rate_rad: f32,
+    pub turret_shoot_timer: Timer,
+    pub turret_vision_range: f32,
+    pub turret_vision_half_angle: f32,
     pub driver: Option<Entity>,
     pub gunner: Option<Entity>,
     pub passengers: Vec<Entity>,
@@ -100,6 +117,9 @@ impl Default for ApcVehicle {
             turret_yaw_local: 0.0,
             turret_target_yaw_local: 0.0,
             turret_turn_rate_rad: 1.85,
+            turret_shoot_timer: Timer::from_seconds(0.28, TimerMode::Repeating),
+            turret_vision_range: 24.0,
+            turret_vision_half_angle: 45.0_f32.to_radians(),
             driver: None,
             gunner: None,
             passengers: Vec::new(),
@@ -573,22 +593,226 @@ pub fn handle_vehicle_crew_mount_commands(
     }
 }
 
-/// Realistic wheeled/tracked APC kinematics and 360° turret rotation:
+/// Checks whether a corridor starting at `origin` along `dir` for `probe_dist` meters is blocked
+/// for an APC (`APC_CLEARANCE_RADIUS = 2.05m` -> `4.10m` minimum passable gap width).
+/// Any gap between two obstacles narrower than `4.10m` is detected as impassable for the APC.
+pub fn is_apc_corridor_blocked(
+    origin: Vec2,
+    dir: Vec2,
+    probe_dist: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+) -> bool {
+    let d = dir.normalize_or_zero();
+    if d.length_squared() < 0.0001 {
+        return false;
+    }
+    let check_r_sq = APC_CLEARANCE_RADIUS * APC_CLEARANCE_RADIUS;
+    // Sample densely along the corridor, extending slightly ahead for the APC's 3.8m front overhang
+    let max_step = (probe_dist + 1.8).max(2.0);
+    let num_samples = ((max_step / 1.35).ceil() as usize).max(2);
+    for i in 1..=num_samples {
+        let step = (i as f32 / num_samples as f32) * max_step;
+        let probe = origin + d * step;
+        for (b_tf, collider) in buildings {
+            let b_center = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+            let closest = Vec2::new(
+                probe.x.clamp(
+                    b_center.x - collider.half_size.x,
+                    b_center.x + collider.half_size.x,
+                ),
+                probe.y.clamp(
+                    b_center.y - collider.half_size.y,
+                    b_center.y + collider.half_size.y,
+                ),
+            );
+            if (probe - closest).length_squared() < check_r_sq {
+                return true;
+            }
+        }
+        for (w_tf, collider) in low_walls {
+            let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+            let closest = Vec2::new(
+                probe.x.clamp(
+                    w_center.x - collider.half_size.x,
+                    w_center.x + collider.half_size.x,
+                ),
+                probe.y.clamp(
+                    w_center.y - collider.half_size.y,
+                    w_center.y + collider.half_size.y,
+                ),
+            );
+            if (probe - closest).length_squared() < check_r_sq {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Checks whether moving from `origin` along `dir` for `probe_dist` meters would run into any
+/// friendly on-foot troops (`friendly_positions`).
+pub fn is_apc_corridor_hitting_friendlies(
+    origin: Vec2,
+    dir: Vec2,
+    probe_dist: f32,
+    friendly_positions: &[Vec2],
+) -> bool {
+    if friendly_positions.is_empty() {
+        return false;
+    }
+    let d = dir.normalize_or_zero();
+    if d.length_squared() < 0.0001 {
+        return false;
+    }
+    let right = Vec2::new(-d.y, d.x);
+    let lateral_clearance = APC_HULL_WIDTH * 0.5 + SOLDIER_RADIUS + 0.65;
+    let max_ahead = probe_dist + APC_HULL_LENGTH * 0.5;
+    for &f_pos in friendly_positions {
+        let rel = f_pos - origin;
+        let along = rel.dot(d);
+        let lat = rel.dot(right).abs();
+        if along > -1.0 && along <= max_ahead && lat < lateral_clearance {
+            return true;
+        }
+    }
+    false
+}
+
+/// Computes an obstacle-avoiding steering direction for the APC:
+/// - Rejects gaps between obstacles narrower than `2 * APC_CLEARANCE_RADIUS` (`4.10m`).
+/// - Steers around friendly on-foot soldiers (`friendly_positions`) when possible.
+/// - Evaluates wide detour corridors and scores them by alignment with `desired_dir`, commitment
+///   to `current_heading` (preventing left/right oscillation), and 2nd-leg clearance toward `goal`.
+pub fn find_apc_avoidance_direction(
+    origin: Vec2,
+    desired_dir: Vec2,
+    current_heading: Vec2,
+    dist_to_goal: f32,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+    friendly_positions: &[Vec2],
+) -> Vec2 {
+    if desired_dir.length_squared() < 0.0001 {
+        return current_heading;
+    }
+    let desired_norm = desired_dir.normalize();
+    let goal = origin + desired_norm * dist_to_goal;
+    let lookahead = dist_to_goal.clamp(5.0, 14.0);
+
+    // 1. If the direct corridor is wide enough for the APC and clear of friendly troops, drive straight toward the goal
+    if !is_apc_corridor_blocked(origin, desired_norm, lookahead, buildings, low_walls)
+        && !is_apc_corridor_hitting_friendlies(
+            origin,
+            desired_norm,
+            lookahead.min(11.0),
+            friendly_positions,
+        )
+    {
+        return desired_norm;
+    }
+
+    const ANGLES: [f32; 16] = [
+        0.26, -0.26, // ~15 deg
+        0.52, -0.52, // ~30 deg
+        0.79, -0.79, // ~45 deg
+        1.05, -1.05, // ~60 deg
+        1.31, -1.31, // ~75 deg
+        1.57, -1.57, // ~90 deg
+        1.92, -1.92, // ~110 deg
+        2.36, -2.36, // ~135 deg
+    ];
+
+    for probe_tier in [12.5_f32.min(lookahead.max(8.5)), 7.5, 4.5] {
+        let mut best_cand: Option<(Vec2, f32)> = None;
+        for angle in ANGLES {
+            let (s, c) = angle.sin_cos();
+            let cand = Vec2::new(
+                desired_norm.x * c - desired_norm.y * s,
+                desired_norm.x * s + desired_norm.y * c,
+            );
+            if !is_apc_corridor_blocked(origin, cand, probe_tier, buildings, low_walls) {
+                let hits_friendly = is_apc_corridor_hitting_friendlies(
+                    origin,
+                    cand,
+                    probe_tier.min(10.0),
+                    friendly_positions,
+                );
+                let wp = origin + cand * probe_tier;
+                let to_goal_from_wp = (goal - wp).normalize_or(cand);
+                let second_leg_dist = (goal - wp).length().clamp(4.0, 10.0);
+                let second_leg_clear = !is_apc_corridor_blocked(
+                    wp,
+                    to_goal_from_wp,
+                    second_leg_dist,
+                    buildings,
+                    low_walls,
+                );
+                let friendly_penalty = if hits_friendly { -4.5 } else { 0.0 };
+                let score = cand.dot(desired_norm) * 2.0
+                    + cand.dot(current_heading) * 0.65
+                    + if second_leg_clear { 1.4 } else { 0.0 }
+                    + friendly_penalty;
+                if best_cand.map_or(true, |(_, best_score)| score > best_score) {
+                    best_cand = Some((cand, score));
+                }
+            }
+        }
+        if let Some((best_dir, _)) = best_cand {
+            return best_dir;
+        }
+    }
+
+    desired_norm
+}
+
+/// Resolves full-hull collisions for the `3.4m × 7.6m` APC against buildings and low walls
+/// using a 3-disc hull capsule (front, center, rear) along `heading`.
+pub fn resolve_apc_hull_obstacle_collision(
+    mut pos: Vec2,
+    heading: Vec2,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+    world_bound: f32,
+) -> Vec2 {
+    let fwd = heading.normalize_or(Vec2::new(0.0, -1.0));
+    let hull_r = APC_HULL_WIDTH * 0.52;
+    for offset in [0.0, 1.9, -1.9] {
+        let disc_pos = pos + fwd * offset;
+        let resolved_disc = resolve_circle_obstacle_collision_bounded(
+            disc_pos,
+            hull_r,
+            buildings,
+            low_walls,
+            world_bound,
+        );
+        pos += resolved_disc - disc_pos;
+    }
+    pos
+}
+
+/// Realistic wheeled/tracked APC kinematics, obstacle & gap navigation, and 360° turret firing:
 /// - Requires a mounted `Driver` to accelerate, reverse, or steer; without a driver the vehicle brakes to a halt.
-/// - Drives forward with realistic acceleration (`7.5 m/s²`), braking distance, and speed-coupled turning radius,
-///   or reverses (`-6.5 m/s`) when backing up to a nearby rear target (`<= 28m` behind the hull).
-/// - Requires a mounted `Gunner` to slewing the 360° circular turret (`ApcTurret`).
+/// - Navigates around buildings and low walls while detecting and avoiding gaps narrower than `4.10m`.
+/// - Requires a mounted `Gunner` to slew the 360° circular turret (`ApcTurret`) and fire at any enemies in view.
 pub fn update_crewed_apc_vehicles(
+    mut commands: Commands,
     time: Res<Time>,
     current_level: Option<Res<CurrentLevel>>,
+    bullet_assets: Option<Res<BulletAssets>>,
+    mut gunshot_mutator: Option<MessageWriter<GunshotEvent>>,
     mut apc_q: Query<
-        (Entity, &mut Transform, &mut ApcVehicle),
+        (Entity, &mut Transform, &Team, &mut ApcVehicle),
         (Without<ApcTurret>, Without<MountedInVehicle>),
     >,
     mut turret_q: Query<(&ApcTurret, &mut Transform), (Without<ApcVehicle>, Without<MountedInVehicle>)>,
     mut mounted_crew_q: Query<
         (&MountedInVehicle, &mut Transform, &mut Soldier, &mut Visibility),
         (Without<ApcVehicle>, Without<ApcTurret>),
+    >,
+    soldiers_q: Query<
+        (&Transform, &Team),
+        (With<Soldier>, Without<ApcVehicle>, Without<ApcTurret>, Without<MountedInVehicle>),
     >,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
@@ -608,15 +832,21 @@ pub fn update_crewed_apc_vehicles(
     };
     let buildings: Vec<(&Transform, &BuildingCollider)> = buildings_q.iter().collect();
     let low_walls: Vec<(&Transform, &LowWallCollider)> = low_walls_q.iter().collect();
-    let collision_radius = APC_HULL_WIDTH * 0.52;
 
     let mut vehicle_states: Vec<(Entity, Vec2, Vec2, Vec2)> = Vec::new();
 
-    for (v_entity, mut v_tf, mut apc) in &mut apc_q {
+    for (v_entity, mut v_tf, v_team, mut apc) in &mut apc_q {
         let mut pos = Vec2::new(v_tf.translation.x, v_tf.translation.z);
         let mut heading = apc.heading.normalize_or(Vec2::new(0.0, -1.0));
 
-        // 1. Hull Driving Kinematics (requires mounted Driver)
+        // Gather friendly on-foot troop positions so the APC steers around friendly infantry
+        let friendly_troops: Vec<Vec2> = soldiers_q
+            .iter()
+            .filter(|(_, s_team)| **s_team == *v_team)
+            .map(|(s_tf, _)| Vec2::new(s_tf.translation.x, s_tf.translation.z))
+            .collect();
+
+        // 1. Hull Driving Kinematics & Obstacle/Friendly-Troop Avoidance (requires mounted Driver)
         if apc.has_driver() {
             match apc.order {
                 VehicleOrder::MoveTo(goal) => {
@@ -626,7 +856,7 @@ pub fn update_crewed_apc_vehicles(
                         / (2.0 * apc.braking_deceleration.max(1.0))
                         + 1.2;
 
-                    if dist <= 1.25 {
+                    if dist <= 1.5 {
                         // Arrived: brake to a halt
                         if apc.current_speed.abs() <= apc.braking_deceleration * dt {
                             apc.current_speed = 0.0;
@@ -635,14 +865,43 @@ pub fn update_crewed_apc_vehicles(
                             apc.current_speed -= apc.current_speed.signum() * apc.braking_deceleration * dt;
                         }
                     } else {
-                        let desired_dir = to_goal / dist;
+                        let raw_dir = to_goal / dist;
+                        let raw_forward_dot = heading.dot(raw_dir);
+
+                        // Choose reverse gear only when backing straight up into an unobstructed nearby rear point
+                        let use_reverse = raw_forward_dot < -0.25
+                            && dist <= 24.0
+                            && !is_apc_corridor_blocked(pos, raw_dir, dist, &buildings, &low_walls)
+                            && !is_apc_corridor_hitting_friendlies(pos, raw_dir, dist, &friendly_troops);
+
+                        let desired_dir = if use_reverse {
+                            raw_dir
+                        } else {
+                            find_apc_avoidance_direction(
+                                pos,
+                                raw_dir,
+                                heading,
+                                dist,
+                                &buildings,
+                                &low_walls,
+                                &friendly_troops,
+                            )
+                        };
+
                         let forward_dot = heading.dot(desired_dir);
                         let right = Vec2::new(-heading.y, heading.x);
                         let right_dot = right.dot(desired_dir);
 
-                        // Choose realistic reverse gear when the target is behind the APC (`forward_dot < -0.25`)
-                        // and within reverse maneuver distance (`dist <= 28.0m`), or while already reversing toward it.
-                        let use_reverse = forward_dot < -0.25 && dist <= 28.0;
+                        // Check if any friendly soldier is immediately ahead of the APC bumper while turning;
+                        // if so, cap speed below APC_LETHAL_IMPACT_SPEED while steering around them.
+                        let friendly_close_ahead = friendly_troops.iter().any(|&f_pos| {
+                            let rel = f_pos - pos;
+                            let along = rel.dot(heading);
+                            let lat = rel.dot(right).abs();
+                            along > 0.0
+                                && along < APC_HULL_LENGTH * 0.5 + 3.5
+                                && lat < APC_HULL_WIDTH * 0.5 + SOLDIER_RADIUS + 0.45
+                        });
 
                         if use_reverse {
                             let target_speed = if dist <= stop_dist {
@@ -677,12 +936,15 @@ pub fn update_crewed_apc_vehicles(
                         } else {
                             // Forward gear with realistic turning radius and braking curve
                             let turn_error = right_dot.atan2(forward_dot);
-                            let sharp_turn_slowdown = if turn_error.abs() > 0.8 { 0.45 } else { 1.0 };
-                            let target_speed = if dist <= stop_dist {
+                            let sharp_turn_slowdown = if turn_error.abs() > 0.65 { 0.48 } else { 1.0 };
+                            let mut target_speed = if dist <= stop_dist {
                                 (dist * 1.4).min(apc.max_forward_speed * 0.35)
                             } else {
                                 apc.max_forward_speed * sharp_turn_slowdown
                             };
+                            if friendly_close_ahead {
+                                target_speed = target_speed.min(APC_LETHAL_IMPACT_SPEED * 0.65);
+                            }
 
                             if apc.current_speed < target_speed {
                                 let accel = if apc.current_speed < 0.0 {
@@ -698,7 +960,7 @@ pub fn update_crewed_apc_vehicles(
                             }
 
                             // Steer hull heading proportionally to forward speed
-                            let speed_factor = (apc.current_speed.abs() / 3.0).clamp(0.30, 1.0);
+                            let speed_factor = (apc.current_speed.abs() / 3.0).clamp(0.35, 1.0);
                             let max_step = apc.max_turn_rate_rad * speed_factor * dt;
                             let yaw_step = turn_error.clamp(-max_step, max_step);
                             let (s, c) = yaw_step.sin_cos();
@@ -730,9 +992,9 @@ pub fn update_crewed_apc_vehicles(
 
         if apc.current_speed.abs() > 0.0001 {
             let next_pos = pos + heading * apc.current_speed * dt;
-            let resolved = resolve_circle_obstacle_collision_bounded(
+            let resolved = resolve_apc_hull_obstacle_collision(
                 next_pos,
-                collision_radius,
+                heading,
                 &buildings,
                 &low_walls,
                 world_bound,
@@ -749,8 +1011,59 @@ pub fn update_crewed_apc_vehicles(
         v_tf.translation.z = pos.y;
         v_tf.rotation = Quat::from_rotation_y(hull_yaw);
 
-        // 2. 360-degree Circular Turret Rotation (requires mounted Gunner)
+        // 2. 360-degree Circular Turret Target Acquisition, Rotation & Firing (requires mounted Gunner)
         if apc.has_gunner() {
+            apc.turret_shoot_timer.tick(time.delta());
+            let current_turret_dir = apc.turret_world_dir();
+
+            // Scan for any enemies in view of the turret's vision cone or driver's forward vision cone
+            let mut nearest_visible_enemy: Option<(Vec2, f32)> = None;
+            for (s_tf, s_team) in &soldiers_q {
+                if *s_team == *v_team {
+                    continue;
+                }
+                let e_pos = Vec2::new(s_tf.translation.x, s_tf.translation.z);
+                let seen_by_turret = can_see_target(
+                    pos,
+                    current_turret_dir,
+                    e_pos,
+                    apc.turret_vision_range,
+                    apc.turret_vision_half_angle,
+                    3.0,
+                    &buildings,
+                );
+                let seen_by_driver = can_see_target(
+                    pos,
+                    heading,
+                    e_pos,
+                    apc.turret_vision_range,
+                    apc.turret_vision_half_angle,
+                    3.0,
+                    &buildings,
+                );
+                if seen_by_turret || seen_by_driver {
+                    let d2 = (e_pos - pos).length_squared();
+                    if nearest_visible_enemy.map_or(true, |(_, best_d2)| d2 < best_d2) {
+                        nearest_visible_enemy = Some((e_pos, d2));
+                    }
+                }
+            }
+
+            if let Some((enemy_pos, _)) = nearest_visible_enemy {
+                let to_enemy = enemy_pos - pos;
+                if to_enemy.length_squared() > 0.001 {
+                    let desired_world_yaw = f32::atan2(-to_enemy.x, -to_enemy.y);
+                    let mut desired_local_yaw = desired_world_yaw - hull_yaw;
+                    while desired_local_yaw > std::f32::consts::PI {
+                        desired_local_yaw -= std::f32::consts::TAU;
+                    }
+                    while desired_local_yaw < -std::f32::consts::PI {
+                        desired_local_yaw += std::f32::consts::TAU;
+                    }
+                    apc.turret_target_yaw_local = desired_local_yaw;
+                }
+            }
+
             // Shortest-angle wrap in [-PI, PI] so the turret spins 360° smoothly in either direction
             let mut angle_diff = apc.turret_target_yaw_local - apc.turret_yaw_local;
             while angle_diff > std::f32::consts::PI {
@@ -771,6 +1084,49 @@ pub fn update_crewed_apc_vehicles(
             }
             while apc.turret_yaw_local < -std::f32::consts::PI {
                 apc.turret_yaw_local += std::f32::consts::TAU;
+            }
+
+            // Fire autocannon when an enemy is in view and the turret barrel is aligned
+            let updated_turret_dir = apc.turret_world_dir();
+            if let Some((enemy_pos, _)) = nearest_visible_enemy {
+                let aim_dir = (enemy_pos - pos).normalize_or(updated_turret_dir);
+                if updated_turret_dir.dot(aim_dir) >= 0.95 && apc.turret_shoot_timer.is_finished()
+                {
+                    apc.turret_shoot_timer.reset();
+                    let muzzle_pos =
+                        pos + updated_turret_dir * (APC_TURRET_RADIUS + APC_BARREL_LENGTH);
+                    let shot_dir = (enemy_pos - muzzle_pos).normalize_or(updated_turret_dir);
+
+                    if let Some(ref assets) = bullet_assets {
+                        let mat = match *v_team {
+                            Team::Player => assets.player_material.clone(),
+                            Team::Enemy => assets.enemy_material.clone(),
+                        };
+                        commands.spawn((
+                            LevelEntity,
+                            Mesh3d(assets.mesh.clone()),
+                            MeshMaterial3d(mat),
+                            Transform::from_xyz(muzzle_pos.x, 0.08, muzzle_pos.y)
+                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                            Bullet {
+                                origin: muzzle_pos,
+                                direction: shot_dir,
+                                speed: 58.0,
+                                lifetime: 1.3,
+                                team: *v_team,
+                                shooter_stance: Stance::Standing,
+                                missed_entities: Vec::new(),
+                            },
+                        ));
+                    }
+
+                    if let Some(ref mut writer) = gunshot_mutator {
+                        writer.write(GunshotEvent {
+                            position: muzzle_pos,
+                            shooter_team: *v_team,
+                        });
+                    }
+                }
             }
         }
 
@@ -895,12 +1251,17 @@ pub fn update_dismounted_crew_return(
     }
 }
 
-/// Prevents dismounted soldiers from walking through the solid armored hull of an `ApcVehicle`
-/// using oriented bounding box (OBB) circle-vs-rotated-rectangle collision resolution.
+/// Resolves collisions between on-foot soldiers and the APC's rectangular hull:
+/// - If the APC collides with any soldier while moving at sufficient speed (`|current_speed| >= APC_LETHAL_IMPACT_SPEED`),
+///   the soldier is killed on impact (converted into a `Corpse` with blood decals) and the APC drives right through them!
+/// - If the APC is moving slowly (`< APC_LETHAL_IMPACT_SPEED`), soldiers in its path are stepped/pushed laterally (`±right`)
+///   aside so the APC never bulldozes a soldier forward across the map.
 pub fn resolve_soldier_apc_collisions(
+    mut commands: Commands,
+    corpse_assets: Option<Res<CorpseAssets>>,
     apc_q: Query<(&Transform, &ApcVehicle), Without<Soldier>>,
     mut soldiers_q: Query<
-        &mut Transform,
+        (Entity, &mut Transform, &Team),
         (With<Soldier>, Without<MountedInVehicle>, Without<ApcVehicle>),
     >,
 ) {
@@ -911,8 +1272,9 @@ pub fn resolve_soldier_apc_collisions(
         let right = Vec2::new(-forward.y, forward.x);
         let half_x = apc.hull_half_size.x;
         let half_z = apc.hull_half_size.y;
+        let speed_abs = apc.current_speed.abs();
 
-        for mut s_tf in &mut soldiers_q {
+        for (s_ent, mut s_tf, s_team) in &mut soldiers_q {
             let s_pos = Vec2::new(s_tf.translation.x, s_tf.translation.z);
             let rel = s_pos - v_pos;
             // Project relative position into vehicle local axes `(local_x, local_z)`
@@ -925,22 +1287,78 @@ pub fn resolve_soldier_apc_collisions(
             let dist_sq = diff_local.length_squared();
 
             if dist_sq < r * r {
-                let new_local = if dist_sq > 0.00001 {
-                    let dist = dist_sq.sqrt();
-                    let push = (diff_local / dist) * (r - dist);
-                    Vec2::new(local_x + push.x, local_z + push.y)
-                } else {
-                    let dx = half_x - local_x.abs();
-                    let dz = half_z - local_z.abs();
-                    if dx < dz {
-                        Vec2::new((half_x + r) * local_x.signum(), local_z)
-                    } else {
-                        Vec2::new(local_x, (half_z + r) * local_z.signum())
+                if speed_abs >= APC_LETHAL_IMPACT_SPEED {
+                    // Lethal high-speed vehicle impact: kill the soldier in place and drive right through them!
+                    let mut entity_cmds = commands.entity(s_ent);
+                    entity_cmds.despawn_children();
+                    entity_cmds
+                        .remove::<Soldier>()
+                        .remove::<Team>()
+                        .remove::<Player>()
+                        .remove::<Enemy>()
+                        .remove::<Friendly>()
+                        .remove::<Zombie>()
+                        .remove::<VehicleCrewMember>()
+                        .insert((
+                            Corpse,
+                            Visibility::Inherited,
+                            Transform::from_xyz(s_pos.x, 0.03, s_pos.y)
+                                .with_rotation(s_tf.rotation)
+                                .with_scale(Vec3::new(0.65, 0.95, 0.65)),
+                        ));
+
+                    if let Some(ref assets) = corpse_assets {
+                        entity_cmds.insert(MeshMaterial3d(if *s_team == Team::Player {
+                            assets.player_corpse_material.clone()
+                        } else {
+                            assets.enemy_corpse_material.clone()
+                        }));
+                        commands.spawn((
+                            LevelEntity,
+                            Mesh3d(assets.blood_pool_mesh.clone()),
+                            MeshMaterial3d(assets.blood_material.clone()),
+                            Transform::from_xyz(s_pos.x, 0.015, s_pos.y)
+                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                            BloodDecal,
+                        ));
+                        for offset in [Vec2::new(0.50, 0.40), Vec2::new(-0.45, -0.35)] {
+                            commands.spawn((
+                                LevelEntity,
+                                Mesh3d(assets.blood_splatter_mesh.clone()),
+                                MeshMaterial3d(assets.blood_material.clone()),
+                                Transform::from_xyz(s_pos.x + offset.x, 0.015, s_pos.y + offset.y)
+                                    .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                                BloodDecal,
+                            ));
+                        }
                     }
-                };
-                let resolved_world = v_pos + right * new_local.x + forward * new_local.y;
-                s_tf.translation.x = resolved_world.x;
-                s_tf.translation.z = resolved_world.y;
+                } else if speed_abs > 0.15 {
+                    // Low-speed contact: push soldier laterally (`±right`) off the side of the hull
+                    // so the APC never pushes a soldier forward a long distance along its movement axis.
+                    let side_sign = if local_x >= 0.0 { 1.0 } else { -1.0 };
+                    let new_local_x = side_sign * (half_x + r + 0.08);
+                    let resolved_world = v_pos + right * new_local_x + forward * local_z;
+                    s_tf.translation.x = resolved_world.x;
+                    s_tf.translation.z = resolved_world.y;
+                } else {
+                    // Stationary parked APC: standard closest-edge OBB collision
+                    let new_local = if dist_sq > 0.00001 {
+                        let dist = dist_sq.sqrt();
+                        let push = (diff_local / dist) * (r - dist);
+                        Vec2::new(local_x + push.x, local_z + push.y)
+                    } else {
+                        let dx = half_x - local_x.abs();
+                        let dz = half_z - local_z.abs();
+                        if dx < dz {
+                            Vec2::new((half_x + r) * local_x.signum(), local_z)
+                        } else {
+                            Vec2::new(local_x, (half_z + r) * local_z.signum())
+                        }
+                    };
+                    let resolved_world = v_pos + right * new_local.x + forward * new_local.y;
+                    s_tf.translation.x = resolved_world.x;
+                    s_tf.translation.z = resolved_world.y;
+                }
             }
         }
     }
@@ -955,7 +1373,24 @@ mod tests {
         app.init_resource::<Assets<Mesh>>();
         app.init_resource::<Assets<StandardMaterial>>();
         app.init_resource::<Time>();
+        app.add_message::<GunshotEvent>();
         app.insert_resource(CurrentLevel::Level4);
+        let bullet_mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Circle::new(crate::common::types::BULLET_RADIUS));
+        let (player_material, enemy_material) = {
+            let mut mats = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            (
+                mats.add(Color::srgb(1.0, 0.9, 0.2)),
+                mats.add(Color::srgb(1.0, 0.2, 0.2)),
+            )
+        };
+        app.insert_resource(BulletAssets {
+            mesh: bullet_mesh,
+            player_material,
+            enemy_material,
+        });
         app.add_systems(
             Update,
             (
@@ -1135,6 +1570,294 @@ mod tests {
         assert!(
             apc_remounted.is_fully_crewed(),
             "Driver and Gunner should have re-entered the APC"
+        );
+    }
+
+    #[test]
+    fn test_apc_navigates_around_obstacle_to_reach_target() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let apc_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ApcVehicle>>()
+            .single(app.world())
+            .unwrap();
+
+        // Place APC at (0.0, 60.0) facing North and place a building at (0.0, 38.0) blocking the direct path to (0.0, 14.0)
+        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
+            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 60.0);
+        app.world_mut().spawn((
+            Building,
+            BuildingCollider {
+                half_size: Vec2::new(4.5, 4.0),
+            },
+            Transform::from_xyz(0.0, 1.5, 38.0),
+        ));
+
+        {
+            let mut apc = app.world_mut().get_mut::<ApcVehicle>(apc_entity).unwrap();
+            apc.order = VehicleOrder::MoveTo(Vec2::new(0.0, 14.0));
+        }
+
+        for _ in 0..140 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let tf = app.world().get::<Transform>(apc_entity).unwrap();
+        let final_pos = Vec2::new(tf.translation.x, tf.translation.z);
+        assert!(
+            (final_pos - Vec2::new(0.0, 14.0)).length() < 3.5,
+            "APC should steer around the obstacle at (0, 38) and reach the goal at (0, 14), ended at {:?}",
+            final_pos
+        );
+    }
+
+    #[test]
+    fn test_apc_detects_narrow_gap_is_too_small_and_detours_around_it() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        // Spawn two low walls at Z = 40.0 leaving a 2.6m gap in the middle (X in [-1.3, 1.3]):
+        // - Left wall: center X = -4.3, half_size.x = 3.0 -> spans [-7.3, -1.3]
+        // - Right wall: center X = +4.3, half_size.x = 3.0 -> spans [+1.3, +7.3]
+        // A 1.2m infantry soldier can walk straight through [-1.3, 1.3], but the 3.4m-wide APC cannot!
+        let left_tf = Transform::from_xyz(-4.3, 0.375, 40.0);
+        let right_tf = Transform::from_xyz(4.3, 0.375, 40.0);
+        let wall_col = LowWallCollider {
+            half_size: Vec2::new(3.0, 0.5),
+        };
+        let walls = vec![(&left_tf, &wall_col), (&right_tf, &wall_col)];
+
+        assert!(
+            is_apc_corridor_blocked(
+                Vec2::new(0.0, 52.0),
+                Vec2::new(0.0, -1.0),
+                14.0,
+                &[],
+                &walls
+            ),
+            "2.6m gap between obstacles must be detected as too small for the 3.4m-wide APC"
+        );
+
+        // Verify a 5.2m wide gap IS recognized as passable for the APC
+        let wide_left_tf = Transform::from_xyz(-5.6, 0.375, 40.0);
+        let wide_right_tf = Transform::from_xyz(5.6, 0.375, 40.0);
+        let wide_walls = vec![(&wide_left_tf, &wall_col), (&wide_right_tf, &wall_col)];
+        assert!(
+            !is_apc_corridor_blocked(
+                Vec2::new(0.0, 52.0),
+                Vec2::new(0.0, -1.0),
+                14.0,
+                &[],
+                &wide_walls
+            ),
+            "5.2m wide gap between obstacles should be recognized as passable for the APC"
+        );
+
+        // Now spawn the narrow-gap walls in the world and verify the APC detours around the outside to reach (0.0, 20.0)
+        app.world_mut().spawn((LowWall, wall_col, left_tf));
+        app.world_mut().spawn((LowWall, wall_col, right_tf));
+
+        let apc_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ApcVehicle>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
+            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 58.0);
+        {
+            let mut apc = app.world_mut().get_mut::<ApcVehicle>(apc_entity).unwrap();
+            apc.order = VehicleOrder::MoveTo(Vec2::new(0.0, 20.0));
+        }
+
+        let mut max_lateral_detour_x = 0.0_f32;
+        for _ in 0..150 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+            let x = app.world().get::<Transform>(apc_entity).unwrap().translation.x.abs();
+            if x > max_lateral_detour_x {
+                max_lateral_detour_x = x;
+            }
+        }
+
+        let tf = app.world().get::<Transform>(apc_entity).unwrap();
+        let final_pos = Vec2::new(tf.translation.x, tf.translation.z);
+        assert!(
+            max_lateral_detour_x > 7.5,
+            "APC must detour around the outside of the narrow gap (|x| > 7.5), max |x| was {:.2}",
+            max_lateral_detour_x
+        );
+        assert!(
+            (final_pos - Vec2::new(0.0, 20.0)).length() < 4.0,
+            "APC should complete its detour around the narrow gap and reach (0, 20), ended at {:?}",
+            final_pos
+        );
+    }
+
+    #[test]
+    fn test_apc_turret_slews_and_fires_at_enemy_in_view() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let apc_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ApcVehicle>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
+            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 50.0);
+
+        // Spawn an enemy soldier at (6.0, 34.0) inside the APC's forward/turret view
+        app.world_mut().spawn((
+            Transform::from_xyz(6.0, 0.05, 34.0),
+            Team::Enemy,
+            Soldier {
+                facing_dir: Vec2::new(0.0, 1.0),
+                shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                stance: Stance::Standing,
+                inventory: crate::common::types::Inventory::default(),
+            },
+        ));
+
+        for _ in 0..20 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        let bullets_fired = app
+            .world_mut()
+            .query::<&Bullet>()
+            .iter(app.world())
+            .count();
+        assert!(
+            bullets_fired > 0,
+            "APC turret with mounted Gunner should slew onto and fire at enemy in view"
+        );
+    }
+
+    #[test]
+    fn test_apc_steers_around_friendly_troops_without_running_them_over_or_pushing_them_far() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let apc_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ApcVehicle>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
+            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 60.0);
+
+        // Spawn a friendly infantry soldier standing at (0.0, 44.0) directly on the road between the APC and (0.0, 20.0)
+        let friendly_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 44.0),
+                Team::Player,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, -1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        {
+            let mut apc = app.world_mut().get_mut::<ApcVehicle>(apc_entity).unwrap();
+            apc.order = VehicleOrder::MoveTo(Vec2::new(0.0, 20.0));
+        }
+
+        for _ in 0..100 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        assert!(
+            app.world().get::<Soldier>(friendly_entity).is_some(),
+            "Friendly soldier must not be killed when the APC maneuvers around them"
+        );
+        let f_tf = app.world().get::<Transform>(friendly_entity).unwrap();
+        assert!(
+            (f_tf.translation.z - 44.0).abs() < 1.0,
+            "Friendly soldier must not be pushed forward along Z by the APC, z was {}",
+            f_tf.translation.z
+        );
+        let apc_tf = app.world().get::<Transform>(apc_entity).unwrap();
+        assert!(
+            apc_tf.translation.z < 26.0,
+            "APC should steer past the friendly soldier toward Z=20, ended at z={}",
+            apc_tf.translation.z
+        );
+    }
+
+    #[test]
+    fn test_apc_moving_at_speed_kills_soldier_on_collision_and_drives_through() {
+        let mut app = create_vehicle_test_app();
+        app.add_systems(Startup, setup_level_vehicles);
+        app.update();
+
+        let apc_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<ApcVehicle>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
+            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 50.0);
+
+        // Spawn an enemy soldier directly in the APC's path at (0.0, 38.0)
+        let enemy_entity = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.05, 38.0),
+                Team::Enemy,
+                Soldier {
+                    facing_dir: Vec2::new(0.0, 1.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+            ))
+            .id();
+
+        {
+            let mut apc = app.world_mut().get_mut::<ApcVehicle>(apc_entity).unwrap();
+            apc.current_speed = 10.0;
+            apc.order = VehicleOrder::MoveTo(Vec2::new(0.0, 20.0));
+        }
+
+        for _ in 0..45 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+        }
+
+        assert!(
+            app.world().get::<Corpse>(enemy_entity).is_some()
+                && app.world().get::<Soldier>(enemy_entity).is_none(),
+            "Soldier hit by APC at high speed must be killed and converted into a Corpse"
+        );
+        let corpse_tf = app.world().get::<Transform>(enemy_entity).unwrap();
+        assert!(
+            (corpse_tf.translation.z - 38.0).abs() < 0.5,
+            "Killed soldier must not be pushed down the road, corpse z was {}",
+            corpse_tf.translation.z
+        );
+        let apc_tf = app.world().get::<Transform>(apc_entity).unwrap();
+        assert!(
+            apc_tf.translation.z < 30.0,
+            "APC should drive directly through the killed soldier without stopping, z={}",
+            apc_tf.translation.z
         );
     }
 }
