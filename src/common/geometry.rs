@@ -646,25 +646,31 @@ pub fn distance_to_box(pos: Vec2, center: Vec2, half_size: Vec2) -> f32 {
     (pos - clamped).length()
 }
 
-/// Returns true if `pos` is within `max_dist` of any low wall collider box.
+/// Returns true if `pos` is within `max_dist` of any low wall collider box (excluding wide river channels).
 pub fn is_near_low_wall(
     pos: Vec2,
     low_walls: &[(&Transform, &LowWallCollider)],
     max_dist: f32,
 ) -> bool {
     low_walls.iter().any(|(w_tf, w_col)| {
+        if w_col.half_size.x > 50.0 {
+            return false;
+        }
         let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
         distance_to_box(pos, center, w_col.half_size) <= max_dist
     })
 }
 
-/// Returns true if the line of fire from `shooter_pos` to `target_pos` intersects any low wall.
+/// Returns true if the line of fire from `shooter_pos` to `target_pos` intersects any low wall (excluding river channels).
 pub fn has_low_wall_in_line_of_fire(
     shooter_pos: Vec2,
     target_pos: Vec2,
     low_walls: &[(&Transform, &LowWallCollider)],
 ) -> bool {
     low_walls.iter().any(|(w_tf, w_col)| {
+        if w_col.half_size.x > 50.0 {
+            return false;
+        }
         let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
         let min = center - w_col.half_size;
         let max = center + w_col.half_size;
@@ -779,6 +785,9 @@ pub fn find_cover_position_with_offset(
     };
 
     for (w_tf, w_col) in low_walls {
+        if w_col.half_size.x > 50.0 {
+            continue;
+        }
         let center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
         evaluate_box(center, w_col.half_size, true);
     }

@@ -2262,7 +2262,8 @@ pub fn update_friendly(
                     },
                     squad_leader_entry,
                 ) {
-                    let squad_obj = active_nav_goal;
+                    let squad_obj =
+                        crate::world::route_across_river_bridge(lead_pos, active_nav_goal, level);
                     // Autonomous squad execution of CommanderOrder::TakePosition or Bypass detour when no Player entity exists
                     let leader_to_obj = squad_obj - lead_pos;
                     let leader_dist_to_obj = leader_to_obj.length();

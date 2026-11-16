@@ -37,6 +37,84 @@ pub struct Ridgeline;
 #[derive(Component)]
 pub struct Trench;
 
+/// Marker component for the broad, deep West-to-East river far south of the village in `test_level_4`.
+#[derive(Component)]
+pub struct River;
+
+/// Marker component for the bridge crossing the river along the North-South road in `test_level_4`.
+#[derive(Component)]
+pub struct Bridge;
+
+/// Broad, deep West-to-East river and road bridge constants in `test_level_4`:
+/// - Located far south of the village (`Z = 118.0`, `63.5m` south of the village perimeter at `Z = 54.5`,
+///   and north of the friendly southern approach staging area at `Z = 178..206`).
+/// - River spans the full `1200m` West-to-East map width (`X in [-600.0, 600.0]`) with a `28.0m` channel width
+///   (`Z in [104.0, 132.0]`).
+/// - Impassable to ground units (infantry and APC) everywhere except across the central road bridge
+///   (`X in [-4.6, 4.6], Z in [104.0, 132.0]`).
+pub const LEVEL_4_RIVER_CENTER_Z: f32 = 118.0;
+pub const LEVEL_4_RIVER_WIDTH: f32 = 28.0;
+pub const LEVEL_4_RIVER_HALF_WIDTH: f32 = LEVEL_4_RIVER_WIDTH * 0.5;
+pub const LEVEL_4_RIVER_NORTH_BANK_Z: f32 = LEVEL_4_RIVER_CENTER_Z - LEVEL_4_RIVER_HALF_WIDTH;
+pub const LEVEL_4_RIVER_SOUTH_BANK_Z: f32 = LEVEL_4_RIVER_CENTER_Z + LEVEL_4_RIVER_HALF_WIDTH;
+pub const LEVEL_4_BRIDGE_HALF_WIDTH_X: f32 = 4.6;
+
+/// Routes ground movement (`origin -> goal`) across the `test_level_4` river bridge when `origin` and `goal`
+/// lie on opposite sides of the river (or clamps `goal` out of the impassable river channel if ordered
+/// directly into the water).
+pub fn route_across_river_bridge(origin: Vec2, goal: Vec2, level: CurrentLevel) -> Vec2 {
+    if level != CurrentLevel::Level4 {
+        return goal;
+    }
+
+    let north_bank = LEVEL_4_RIVER_NORTH_BANK_Z;
+    let south_bank = LEVEL_4_RIVER_SOUTH_BANK_Z;
+    let bridge_safe_half_x = 2.8_f32;
+
+    // If `goal` itself is inside the impassable river water outside the bridge, clamp it to the nearer bank
+    let effective_goal = if goal.y > north_bank - 0.8
+        && goal.y < south_bank + 0.8
+        && goal.x.abs() > LEVEL_4_BRIDGE_HALF_WIDTH_X - 0.6
+    {
+        let clamped_z = if (origin.y - LEVEL_4_RIVER_CENTER_Z) >= 0.0 {
+            south_bank + 1.8
+        } else {
+            north_bank - 1.8
+        };
+        Vec2::new(goal.x, clamped_z)
+    } else {
+        goal
+    };
+
+    // Moving South-to-North across the river
+    if origin.y > north_bank && effective_goal.y < north_bank {
+        if origin.y > south_bank + 1.2 && origin.x.abs() > bridge_safe_half_x {
+            return Vec2::new(0.0, south_bank + 2.8);
+        }
+        if origin.x.abs() > bridge_safe_half_x || effective_goal.x.abs() > bridge_safe_half_x {
+            return Vec2::new(
+                effective_goal.x.clamp(-2.2, 2.2),
+                north_bank - 2.8,
+            );
+        }
+    }
+
+    // Moving North-to-South across the river
+    if origin.y < south_bank && effective_goal.y > south_bank {
+        if origin.y < north_bank - 1.2 && origin.x.abs() > bridge_safe_half_x {
+            return Vec2::new(0.0, north_bank - 2.8);
+        }
+        if origin.x.abs() > bridge_safe_half_x || effective_goal.x.abs() > bridge_safe_half_x {
+            return Vec2::new(
+                effective_goal.x.clamp(-2.2, 2.2),
+                south_bank + 2.8,
+            );
+        }
+    }
+
+    effective_goal
+}
+
 /// Circular negative-elevation depression (`h < 0.0m`), such as an artillery shell crater or foxhole.
 /// Units inside a depression sit below base elevation (`0.0m`) and appear slightly smaller.
 #[derive(Component, Clone, Copy, Debug)]

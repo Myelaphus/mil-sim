@@ -135,9 +135,13 @@ pub fn update_bullets(
         }
 
         // 2. Check low wall collision: bullets fired while crouched or prone cannot clear waist-height walls
+        //    (excluding wide flat river channel colliders).
         if bullet.shooter_stance != Stance::Standing {
             let mut hit_low_wall = false;
             for (w_tf, collider) in &low_walls {
+                if collider.half_size.x > 50.0 {
+                    continue;
+                }
                 let w_center = Vec2::new(w_tf.translation.x, w_tf.translation.z);
                 if bullet_pos.x >= w_center.x - collider.half_size.x
                     && bullet_pos.x <= w_center.x + collider.half_size.x

@@ -2986,14 +2986,16 @@ pub fn update_crewed_apc_vehicles(
         // 1. Hull Driving Kinematics & Obstacle/Friendly-Troop Avoidance (requires mounted Driver)
         if apc.has_driver() {
             match apc.order {
-                VehicleOrder::MoveTo(goal) => {
+                VehicleOrder::MoveTo(raw_goal) => {
+                    let goal = crate::world::route_across_river_bridge(pos, raw_goal, level);
                     let to_goal = goal - pos;
                     let dist = to_goal.length();
+                    let final_dist = (raw_goal - pos).length();
                     let stop_dist = (apc.current_speed.abs() * apc.current_speed.abs())
                         / (2.0 * apc.braking_deceleration.max(1.0))
                         + 1.2;
 
-                    if dist <= 1.5 {
+                    if final_dist <= 1.5 || (dist <= 1.5 && (goal - raw_goal).length() < 0.5) {
                         // Arrived: brake to a halt
                         if apc.current_speed.abs() <= apc.braking_deceleration * dt {
                             apc.current_speed = 0.0;

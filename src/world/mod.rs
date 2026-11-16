@@ -231,27 +231,198 @@ pub fn setup_level_world(
         MeshMaterial3d(materials.add(Color::srgb(0.22, 0.35, 0.22))),
     ));
 
-    // North-to-South road for test_level_4 extending from top (-Z) to bottom (+Z) of map through the village.
-    // Placed as a flat surface at Y = 0.01 (above ground at Y = 0.0, below vision cones and soldiers at Y >= 0.035).
+    // North-to-South road, broad West-to-East river far south of the village, and road bridge for test_level_4.
+    // The road stretch that would intersect the river (`Z in [104.0, 132.0]`) is replaced by the bridge.
     if level == CurrentLevel::Level4 {
         let road_material = materials.add(StandardMaterial {
             base_color: Color::srgb(0.28, 0.28, 0.30),
             perceptual_roughness: 0.92,
             ..default()
         });
+
+        let north_road_len = LEVEL_4_RIVER_NORTH_BANK_Z - (-RTS_WORLD_HALF_SIZE);
+        let north_road_center_z = 0.5 * (-RTS_WORLD_HALF_SIZE + LEVEL_4_RIVER_NORTH_BANK_Z);
+        let south_road_len = RTS_WORLD_HALF_SIZE - LEVEL_4_RIVER_SOUTH_BANK_Z;
+        let south_road_center_z = 0.5 * (LEVEL_4_RIVER_SOUTH_BANK_Z + RTS_WORLD_HALF_SIZE);
+
+        let road_root = commands
+            .spawn((
+                LevelEntity,
+                Road,
+                Visibility::default(),
+                Transform::from_xyz(0.0, 0.01, 0.0),
+            ))
+            .id();
+
+        // North road stretch (`Z in [-600.0, 104.0]`, stopping at the north riverbank)
         commands.spawn((
-            LevelEntity,
-            Road,
             Mesh3d(
                 meshes.add(
                     Plane3d::default()
                         .mesh()
-                        .size(RTS_ROAD_WIDTH, RTS_WORLD_SIZE),
+                        .size(RTS_ROAD_WIDTH, north_road_len),
+                ),
+            ),
+            MeshMaterial3d(road_material.clone()),
+            Transform::from_xyz(0.0, 0.0, north_road_center_z),
+            ChildOf(road_root),
+        ));
+
+        // South road stretch (`Z in [132.0, +600.0]`, starting at the south riverbank)
+        commands.spawn((
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(RTS_ROAD_WIDTH, south_road_len),
+                ),
+            ),
+            MeshMaterial3d(road_material.clone()),
+            Transform::from_xyz(0.0, 0.0, south_road_center_z),
+            ChildOf(road_root),
+        ));
+
+        // Broad, deep West-to-East River far south of the village (`Z = 118.0`, width `28.0m`)
+        let riverbank_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.32, 0.28, 0.20),
+            perceptual_roughness: 0.95,
+            ..default()
+        });
+        let river_outer_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.11, 0.30, 0.42),
+            perceptual_roughness: 0.35,
+            metallic: 0.1,
+            ..default()
+        });
+        let river_deep_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.06, 0.19, 0.31),
+            perceptual_roughness: 0.25,
+            metallic: 0.15,
+            ..default()
+        });
+
+        commands.spawn((
+            LevelEntity,
+            River,
+            NotShadowCaster,
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(RTS_WORLD_SIZE, LEVEL_4_RIVER_WIDTH + 3.2),
+                ),
+            ),
+            MeshMaterial3d(riverbank_mat),
+            Transform::from_xyz(0.0, 0.004, LEVEL_4_RIVER_CENTER_Z),
+        ));
+        commands.spawn((
+            LevelEntity,
+            River,
+            NotShadowCaster,
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(RTS_WORLD_SIZE, LEVEL_4_RIVER_WIDTH),
+                ),
+            ),
+            MeshMaterial3d(river_outer_mat),
+            Transform::from_xyz(0.0, 0.007, LEVEL_4_RIVER_CENTER_Z),
+        ));
+        commands.spawn((
+            LevelEntity,
+            River,
+            NotShadowCaster,
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(RTS_WORLD_SIZE, LEVEL_4_RIVER_WIDTH * 0.64),
+                ),
+            ),
+            MeshMaterial3d(river_deep_mat),
+            Transform::from_xyz(0.0, 0.010, LEVEL_4_RIVER_CENTER_Z),
+        ));
+
+        // Impassable West and East river channel colliders, leaving only the central bridge (`X in [-4.6, 4.6]`) open
+        let channel_half_x = (RTS_WORLD_HALF_SIZE - LEVEL_4_BRIDGE_HALF_WIDTH_X) * 0.5;
+        let channel_center_x = LEVEL_4_BRIDGE_HALF_WIDTH_X + channel_half_x;
+        for side in [-1.0_f32, 1.0_f32] {
+            commands.spawn((
+                LevelEntity,
+                River,
+                Transform::from_xyz(side * channel_center_x, 0.0, LEVEL_4_RIVER_CENTER_Z),
+                LowWallCollider {
+                    half_size: Vec2::new(channel_half_x, LEVEL_4_RIVER_HALF_WIDTH),
+                },
+            ));
+        }
+
+        // Bridge replacing the intersecting stretch of road (`Z in [104.0, 132.0]`)
+        let bridge_span_z = LEVEL_4_RIVER_WIDTH + 4.0;
+        let bridge_deck_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.48, 0.49, 0.51),
+            perceptual_roughness: 0.85,
+            ..default()
+        });
+        let bridge_parapet_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.58, 0.59, 0.61),
+            perceptual_roughness: 0.80,
+            ..default()
+        });
+
+        let bridge_entity = commands
+            .spawn((
+                LevelEntity,
+                Bridge,
+                NotShadowCaster,
+                Mesh3d(
+                    meshes.add(
+                        Plane3d::default()
+                            .mesh()
+                            .size(LEVEL_4_BRIDGE_HALF_WIDTH_X * 2.1, bridge_span_z),
+                    ),
+                ),
+                MeshMaterial3d(bridge_deck_mat.clone()),
+                Transform::from_xyz(0.0, 0.014, LEVEL_4_RIVER_CENTER_Z),
+            ))
+            .id();
+
+        // Central bridge roadway surface matching the North/South road width
+        commands.spawn((
+            NotShadowCaster,
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(RTS_ROAD_WIDTH, bridge_span_z),
                 ),
             ),
             MeshMaterial3d(road_material),
-            Transform::from_xyz(0.0, 0.01, 0.0),
+            Transform::from_xyz(0.0, 0.004, 0.0),
+            ChildOf(bridge_entity),
         ));
+
+        // Left and right raised stone/concrete bridge parapets along the outer edges of the bridge
+        let parapet_mesh = meshes.add(Cuboid::new(0.45, 0.85, bridge_span_z));
+        let abutment_post_mesh = meshes.add(Cuboid::new(0.75, 1.15, 0.75));
+        for side in [-1.0_f32, 1.0_f32] {
+            let rail_x = side * (LEVEL_4_BRIDGE_HALF_WIDTH_X + 0.25);
+            commands.spawn((
+                Mesh3d(parapet_mesh.clone()),
+                MeshMaterial3d(bridge_parapet_mat.clone()),
+                Transform::from_xyz(rail_x, 0.42, 0.0),
+                ChildOf(bridge_entity),
+            ));
+            for end_z in [-bridge_span_z * 0.5, bridge_span_z * 0.5] {
+                commands.spawn((
+                    Mesh3d(abutment_post_mesh.clone()),
+                    MeshMaterial3d(bridge_parapet_mat.clone()),
+                    Transform::from_xyz(rail_x, 0.56, end_z),
+                    ChildOf(bridge_entity),
+                ));
+            }
+        }
     }
 
     // Common white building material
@@ -866,6 +1037,128 @@ mod tests {
             "Moving uphill ({:.2}) should be slower than flat ground and downhill ({:.2}) faster",
             uphill_mult,
             downhill_mult
+        );
+    }
+
+    #[test]
+    fn test_level_4_broad_river_is_impassable_except_across_bridge() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.insert_resource(CurrentLevel::Level4);
+        app.add_systems(Startup, setup_level_world);
+        app.update();
+
+        // 1. Verify the River and Bridge entities spawned far south of the village (`Z = 118.0 > 55.0`),
+        //    and the Road entity has 2 child segments (North and South of the river) with the Bridge replacing the crossing
+        let river_count = app
+            .world_mut()
+            .query_filtered::<&Transform, With<River>>()
+            .iter(app.world())
+            .count();
+        assert!(
+            river_count >= 5,
+            "Expected River visual layers and West/East channel colliders, got {}",
+            river_count
+        );
+
+        let bridge_tf = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Bridge>>()
+            .single(app.world())
+            .expect("test_level_4 must spawn a Bridge across the river");
+        assert!(
+            (bridge_tf.translation.x - 0.0).abs() < 1e-4
+                && (bridge_tf.translation.z - LEVEL_4_RIVER_CENTER_Z).abs() < 1e-4,
+            "Bridge should be centered on the road at (0.0, {}), got {:?}",
+            LEVEL_4_RIVER_CENTER_Z,
+            bridge_tf.translation
+        );
+
+        let road_children = app
+            .world_mut()
+            .query_filtered::<&Children, With<Road>>()
+            .single(app.world())
+            .expect("Road entity should have North and South road segment children");
+        assert_eq!(
+            road_children.len(),
+            2,
+            "Road should be split into North and South stretches with the Bridge replacing the river intersection"
+        );
+
+        // 2. Collect river/obstacle colliders and verify the river is impassable outside the bridge
+        //    but passable across the bridge (`X = 0.0`) for both infantry and the APC
+        let low_wall_pairs: Vec<(Transform, LowWallCollider)> = app
+            .world_mut()
+            .query::<(&Transform, &LowWallCollider)>()
+            .iter(app.world())
+            .map(|(t, c)| (*t, *c))
+            .collect();
+        let w_refs: Vec<(&Transform, &LowWallCollider)> =
+            low_wall_pairs.iter().map(|(t, c)| (t, c)).collect();
+
+        // Attempting to step into the river away from the bridge (`X = 35.0, Z = 131.5`) pushes the soldier back onto the south bank (`Z >= 132.6`)
+        let in_water_attempt = Vec2::new(35.0, LEVEL_4_RIVER_SOUTH_BANK_Z - 0.5);
+        let resolved_bank = crate::common::geometry::resolve_circle_obstacle_collision_bounded(
+            in_water_attempt,
+            crate::common::types::SOLDIER_RADIUS,
+            &[],
+            &w_refs,
+            crate::common::types::RTS_SOLDIER_WORLD_BOUND,
+        );
+        assert!(
+            resolved_bank.y >= LEVEL_4_RIVER_SOUTH_BANK_Z + crate::common::types::SOLDIER_RADIUS - 0.05,
+            "Soldier attempting to enter the river outside the bridge must be stopped at the riverbank, got {:?}",
+            resolved_bank
+        );
+
+        // Walking across the bridge (`X = 0.0, Z = 118.0`) is completely unobstructed
+        let on_bridge_pos = Vec2::new(0.0, LEVEL_4_RIVER_CENTER_Z);
+        let resolved_bridge = crate::common::geometry::resolve_circle_obstacle_collision_bounded(
+            on_bridge_pos,
+            crate::common::types::SOLDIER_RADIUS,
+            &[],
+            &w_refs,
+            crate::common::types::RTS_SOLDIER_WORLD_BOUND,
+        );
+        assert!(
+            (resolved_bridge - on_bridge_pos).length() < 1e-4,
+            "Soldier on the bridge must not collide with the river, got {:?}",
+            resolved_bridge
+        );
+
+        // APC corridor check: blocked across the river at X = 35.0, clear across the bridge at X = 0.0
+        assert!(
+            crate::vehicle::is_apc_corridor_blocked(
+                Vec2::new(35.0, LEVEL_4_RIVER_SOUTH_BANK_Z + 4.0),
+                Vec2::new(0.0, -1.0),
+                12.0,
+                &[],
+                &w_refs,
+            ),
+            "APC must be blocked from driving into the river away from the bridge"
+        );
+        assert!(
+            !crate::vehicle::is_apc_corridor_blocked(
+                Vec2::new(0.0, LEVEL_4_RIVER_SOUTH_BANK_Z + 4.0),
+                Vec2::new(0.0, -1.0),
+                12.0,
+                &[],
+                &w_refs,
+            ),
+            "APC must be able to drive across the bridge"
+        );
+
+        // Off-road cross-river orders route onto the bridge approach first
+        let waypoint = route_across_river_bridge(
+            Vec2::new(40.0, 165.0),
+            Vec2::new(25.0, 45.0),
+            CurrentLevel::Level4,
+        );
+        assert!(
+            waypoint.x.abs() < 3.0 && waypoint.y > LEVEL_4_RIVER_SOUTH_BANK_Z,
+            "Off-road South-to-North movement should route to the South Bridge approach first, got {:?}",
+            waypoint
         );
     }
 }
