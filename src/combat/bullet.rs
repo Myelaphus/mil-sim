@@ -1,15 +1,15 @@
-use std::f32::consts::FRAC_PI_2;
-use bevy::prelude::*;
-use crate::common::geometry::line_intersects_box;
+use crate::common::geometry::{is_sightline_blocked_by_ridgeline, line_intersects_box};
 use crate::common::types::{
-    BloodDecal, Corpse, LevelEntity, Soldier, Stance, Suppression, Team, BULLET_RADIUS,
-    SOLDIER_RADIUS, SUPPRESSION_COVER_HIT_AMOUNT, SUPPRESSION_NEAR_MISS_AMOUNT, SUPPRESSION_RADIUS,
-    WORLD_HALF_SIZE,
+    BULLET_RADIUS, BloodDecal, Corpse, LevelEntity, RTS_WORLD_HALF_SIZE, SOLDIER_RADIUS,
+    SUPPRESSION_COVER_HIT_AMOUNT, SUPPRESSION_NEAR_MISS_AMOUNT, SUPPRESSION_RADIUS, Soldier,
+    Stance, Suppression, Team,
 };
 use crate::enemy::ai::Enemy;
 use crate::friendly::Friendly;
 use crate::player::Player;
-use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
+use crate::world::buildings::{Building, BuildingCollider, LowWallCollider};
+use bevy::prelude::*;
+use std::f32::consts::FRAC_PI_2;
 
 #[derive(Component, Default)]
 pub struct BulletSuppressionTracker {
@@ -49,9 +49,14 @@ pub fn update_bullets(
     mut commands: Commands,
     time: Res<Time>,
     corpse_assets: Res<CorpseAssets>,
-    mut bullet_q: Query<(Entity, &mut Transform, &mut Bullet, &mut BulletSuppressionTracker)>,
+    mut bullet_q: Query<(
+        Entity,
+        &mut Transform,
+        &mut Bullet,
+        &mut BulletSuppressionTracker,
+    )>,
     buildings_q: Query<(&Transform, &BuildingCollider), (With<Building>, Without<Bullet>)>,
-    low_walls_q: Query<(&Transform, &LowWallCollider), (With<LowWall>, Without<Bullet>)>,
+    low_walls_q: Query<(&Transform, &LowWallCollider), Without<Bullet>>,
     mut characters_q: Query<
         (Entity, &Transform, &Team, &Soldier, &mut Suppression),
         (Without<Bullet>, Without<crate::vehicle::MountedInVehicle>),
@@ -75,13 +80,22 @@ pub fn update_bullets(
         tf.translation.z += bullet.direction.y * bullet.speed * dt;
 
         // Map boundaries check derived directly from unified world dimensions
-        if tf.translation.x.abs() > WORLD_HALF_SIZE || tf.translation.z.abs() > WORLD_HALF_SIZE {
+        if tf.translation.x.abs() > RTS_WORLD_HALF_SIZE
+            || tf.translation.z.abs() > RTS_WORLD_HALF_SIZE
+        {
             commands.entity(b_entity).despawn();
             continue;
         }
 
         let bullet_pos = Vec2::new(tf.translation.x, tf.translation.z);
         let is_aerial_bullet = tf.translation.y > 5.0;
+
+        // 0. Check ridgeline terrain impact for ground direct-fire bullets:
+        //    Bullets fired from low ground cannot pass through the rising hillside to hit reverse-slope targets.
+        if !is_aerial_bullet && is_sightline_blocked_by_ridgeline(bullet.origin, bullet_pos) {
+            commands.entity(b_entity).despawn();
+            continue;
+        }
 
         // 1. Check building collision:
         //    - Ground-level bullets are blocked by full-height buildings unconditionally.
@@ -153,8 +167,7 @@ pub fn update_bullets(
 
         // 2.5. Apply near-miss proximity suppression as bullet flies near opposing soldiers
         for (char_entity, char_tf, char_team, _, mut suppression) in &mut characters_q {
-            if bullet.team != *char_team
-                && !sup_tracker.suppressed_entities.contains(&char_entity)
+            if bullet.team != *char_team && !sup_tracker.suppressed_entities.contains(&char_entity)
             {
                 let char_pos = Vec2::new(char_tf.translation.x, char_tf.translation.z);
                 if (bullet_pos - char_pos).length_squared() <= suppression_dist_sq {
@@ -207,7 +220,8 @@ pub fn update_bullets(
                             Stance::Standing => 0,
                         };
 
-                        let seed = (time.elapsed().as_millis() ^ (char_entity.to_bits() as u128)) as u64;
+                        let seed =
+                            (time.elapsed().as_millis() ^ (char_entity.to_bits() as u128)) as u64;
                         let miss = (seed % 100) < miss_chance;
                         if miss {
                             // Shot missed the ducked/prone soldier: mark character as missed
@@ -251,17 +265,18 @@ pub fn update_bullets(
                     ));
 
                     // Spawn small splatter droplets nearby for realistic ground pool
-                    let splatters = [
-                        Vec2::new(0.50, 0.40),
-                        Vec2::new(-0.45, -0.35),
-                    ];
+                    let splatters = [Vec2::new(0.50, 0.40), Vec2::new(-0.45, -0.35)];
                     for offset in splatters {
                         commands.spawn((
                             LevelEntity,
                             Mesh3d(corpse_assets.blood_splatter_mesh.clone()),
                             MeshMaterial3d(corpse_assets.blood_material.clone()),
-                            Transform::from_xyz(char_pos.x + offset.x, 0.015, char_pos.y + offset.y)
-                                .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                            Transform::from_xyz(
+                                char_pos.x + offset.x,
+                                0.015,
+                                char_pos.y + offset.y,
+                            )
+                            .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                             BloodDecal,
                         ));
                     }
@@ -375,7 +390,10 @@ mod tests {
             .query::<&BloodDecal>()
             .iter(app.world())
             .count();
-        assert!(blood_decal_count > 0, "Blood decal should be spawned under the fallen soldier");
+        assert!(
+            blood_decal_count > 0,
+            "Blood decal should be spawned under the fallen soldier"
+        );
     }
 
     #[test]
@@ -469,4 +487,3 @@ mod tests {
         assert!(!enemy.contains::<Corpse>());
     }
 }
-

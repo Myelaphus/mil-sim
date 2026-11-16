@@ -1,6 +1,3 @@
-use bevy::light::{NotShadowCaster, NotShadowReceiver};
-use bevy::prelude::*;
-use std::f32::consts::FRAC_PI_2;
 use crate::combat::bullet::{Bullet, BulletAssets, CorpseAssets};
 use crate::common::geometry::{
     can_see_target, can_see_target_aerial, resolve_circle_obstacle_collision_bounded,
@@ -15,6 +12,9 @@ use crate::fog::mesh::create_vision_cone_mesh;
 use crate::friendly::{Friendly, FriendlyAiState};
 use crate::player::Player;
 use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::prelude::*;
+use std::f32::consts::FRAC_PI_2;
 
 /// Realistic scale constants for the Armored Personnel Carrier (APC) (8x8 IFV/Stryker-class):
 /// - Hull width (`X` in local space): `3.4m` (2 soldiers side-by-side + armor plating)
@@ -331,13 +331,17 @@ impl Default for AttackHelicopter {
 impl AttackHelicopter {
     /// World-space right vector perpendicular to `heading` on the XZ plane.
     pub fn right_dir(&self) -> Vec2 {
-        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let forward = self
+            .heading
+            .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
         Vec2::new(-forward.y, forward.x)
     }
 
     /// World-space 2D planar velocity vector (`m/s`) combining forward/backward and strafe movement.
     pub fn velocity_2d(&self) -> Vec2 {
-        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let forward = self
+            .heading
+            .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
         let right = self.right_dir();
         forward * self.forward_speed + right * self.strafe_speed
     }
@@ -358,16 +362,14 @@ impl AttackHelicopter {
         };
         let max_lat = self.max_strafe_speed.max(0.1);
         let denom = ((dir.x / max_long).powi(2) + (dir.y / max_lat).powi(2)).sqrt();
-        if denom > 1e-6 {
-            1.0 / denom
-        } else {
-            0.0
-        }
+        if denom > 1e-6 { 1.0 / denom } else { 0.0 }
     }
 
     /// World-space 2D aiming direction of the limited-arc chin autocannon.
     pub fn cannon_world_dir(&self) -> Vec2 {
-        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let forward = self
+            .heading
+            .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
         let fuselage_yaw = f32::atan2(-forward.x, -forward.y);
         let clamped_local = self
             .cannon_yaw_local
@@ -379,7 +381,9 @@ impl AttackHelicopter {
     /// World-space XZ position of the nose-mounted chin autocannon turret pivot given the
     /// helicopter's world XZ center position `heli_pos`.
     pub fn cannon_world_pos(&self, heli_pos: Vec2) -> Vec2 {
-        let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let forward = self
+            .heading
+            .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
         heli_pos + forward * HELICOPTER_CANNON_MOUNT_FORWARD
     }
 
@@ -468,7 +472,11 @@ impl FieldArtillery {
 
     /// World-space XZ position and 2D facing vector for one of the 4 operating crew soldiers (`slot 0..4`)
     /// standing behind the howitzer emplacement.
-    pub fn crew_station_world_pos_and_facing(&self, artillery_pos: Vec2, slot: usize) -> (Vec2, Vec2) {
+    pub fn crew_station_world_pos_and_facing(
+        &self,
+        artillery_pos: Vec2,
+        slot: usize,
+    ) -> (Vec2, Vec2) {
         let forward = self.heading.normalize_or(LEVEL_4_FRIENDLY_ARTILLERY_FACING);
         let right = Vec2::new(-forward.y, forward.x);
         let (right_offset, rear_offset, splay) = match slot % 4 {
@@ -565,7 +573,11 @@ pub fn spawn_apc_with_crew(
         ),
     };
 
-    let hull_mesh = meshes.add(Cuboid::new(APC_HULL_WIDTH, APC_HULL_HEIGHT, APC_HULL_LENGTH));
+    let hull_mesh = meshes.add(Cuboid::new(
+        APC_HULL_WIDTH,
+        APC_HULL_HEIGHT,
+        APC_HULL_LENGTH,
+    ));
     let hull_mat = materials.add(StandardMaterial {
         base_color: hull_color,
         perceptual_roughness: 0.75,
@@ -582,7 +594,11 @@ pub fn spawn_apc_with_crew(
     });
 
     // Rear troop ramp accent bar
-    let ramp_mesh = meshes.add(Cuboid::new(APC_HULL_WIDTH * 0.76, APC_HULL_HEIGHT * 0.72, 0.20));
+    let ramp_mesh = meshes.add(Cuboid::new(
+        APC_HULL_WIDTH * 0.76,
+        APC_HULL_HEIGHT * 0.72,
+        0.20,
+    ));
     let ramp_mat = materials.add(StandardMaterial {
         base_color: barrel_color,
         perceptual_roughness: 0.85,
@@ -597,7 +613,11 @@ pub fn spawn_apc_with_crew(
         metallic: 0.25,
         ..default()
     });
-    let barrel_mesh = meshes.add(Cuboid::new(APC_BARREL_WIDTH, APC_BARREL_WIDTH, APC_BARREL_LENGTH));
+    let barrel_mesh = meshes.add(Cuboid::new(
+        APC_BARREL_WIDTH,
+        APC_BARREL_WIDTH,
+        APC_BARREL_LENGTH,
+    ));
     let barrel_mat = materials.add(StandardMaterial {
         base_color: barrel_color,
         perceptual_roughness: 0.5,
@@ -662,11 +682,7 @@ pub fn spawn_apc_with_crew(
     commands.spawn((
         Mesh3d(barrel_mesh),
         MeshMaterial3d(barrel_mat),
-        Transform::from_xyz(
-            0.0,
-            0.05,
-            -(APC_TURRET_RADIUS + APC_BARREL_LENGTH * 0.45),
-        ),
+        Transform::from_xyz(0.0, 0.05, -(APC_TURRET_RADIUS + APC_BARREL_LENGTH * 0.45)),
         ChildOf(turret_entity),
     ));
 
@@ -706,8 +722,9 @@ pub fn spawn_apc_with_crew(
                 LevelEntity,
                 Mesh3d(soldier_mesh.clone()),
                 MeshMaterial3d(soldier_mat.clone()),
-                Transform::from_xyz(spawn_pos.x, 0.05, spawn_pos.y)
-                    .with_rotation(Quat::from_rotation_y(hull_yaw) * Quat::from_rotation_x(-FRAC_PI_2)),
+                Transform::from_xyz(spawn_pos.x, 0.05, spawn_pos.y).with_rotation(
+                    Quat::from_rotation_y(hull_yaw) * Quat::from_rotation_x(-FRAC_PI_2),
+                ),
                 Visibility::Hidden,
                 team,
                 Soldier {
@@ -1123,14 +1140,8 @@ pub fn spawn_field_artillery(
     let yaw = f32::atan2(-forward.x, -forward.y);
 
     let (olive_color, shield_color) = match team {
-        Team::Player => (
-            Color::srgb(0.24, 0.34, 0.22),
-            Color::srgb(0.20, 0.29, 0.19),
-        ),
-        Team::Enemy => (
-            Color::srgb(0.42, 0.26, 0.22),
-            Color::srgb(0.35, 0.21, 0.18),
-        ),
+        Team::Player => (Color::srgb(0.24, 0.34, 0.22), Color::srgb(0.20, 0.29, 0.19)),
+        Team::Enemy => (Color::srgb(0.42, 0.26, 0.22), Color::srgb(0.35, 0.21, 0.18)),
     };
 
     let olive_mat = materials.add(StandardMaterial {
@@ -1351,8 +1362,9 @@ pub fn spawn_field_artillery(
                 LevelEntity,
                 Mesh3d(soldier_mesh.clone()),
                 MeshMaterial3d(soldier_mat.clone()),
-                Transform::from_xyz(station_pos.x, 0.05, station_pos.y)
-                    .with_rotation(Quat::from_rotation_y(station_yaw) * Quat::from_rotation_x(-FRAC_PI_2)),
+                Transform::from_xyz(station_pos.x, 0.05, station_pos.y).with_rotation(
+                    Quat::from_rotation_y(station_yaw) * Quat::from_rotation_x(-FRAC_PI_2),
+                ),
                 Visibility::Inherited,
                 team,
                 Soldier {
@@ -1617,8 +1629,7 @@ pub fn update_attack_helicopters(
                 continue;
             }
             let dir_to_enemy = to_enemy.normalize_or_zero();
-            let in_cannon_range =
-                dist_sq <= heli.cannon_vision_range * heli.cannon_vision_range;
+            let in_cannon_range = dist_sq <= heli.cannon_vision_range * heli.cannon_vision_range;
             if in_cannon_range
                 && can_see_target_aerial(
                     current_cannon_pos,
@@ -1643,7 +1654,9 @@ pub fn update_attack_helicopters(
             let to_pt = target_pt - current_pos;
             if to_pt.length_squared() > 0.25 && !heli.maintain_heading {
                 let desired_dir = to_pt.normalize();
-                let cur_fwd = heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+                let cur_fwd = heli
+                    .heading
+                    .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
                 let current_yaw = f32::atan2(-cur_fwd.x, -cur_fwd.y);
                 let target_yaw = f32::atan2(-desired_dir.x, -desired_dir.y);
                 let mut yaw_diff = target_yaw - current_yaw;
@@ -1696,9 +1709,9 @@ pub fn update_attack_helicopters(
                             rotate_heading_toward(&mut heli, target_pos);
                             let updated_forward = heli.heading;
                             let alignment = desired_dir_world.dot(updated_forward).max(0.0);
-                            let arrival_speed =
-                                ((2.0 * heli.deceleration * (dist - 0.6).max(0.0)).sqrt())
-                                    .min(heli.max_forward_speed);
+                            let arrival_speed = ((2.0 * heli.deceleration * (dist - 0.6).max(0.0))
+                                .sqrt())
+                            .min(heli.max_forward_speed);
                             (
                                 (arrival_speed * alignment * alignment)
                                     .clamp(0.0, heli.max_forward_speed),
@@ -1713,16 +1726,17 @@ pub fn update_attack_helicopters(
                                     rotate_heading_toward(&mut heli, enemy_pos);
                                 }
                             }
-                            let updated_fwd =
-                                heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+                            let updated_fwd = heli
+                                .heading
+                                .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
                             let updated_right = heli.right_dir();
                             let local_forward = desired_dir_world.dot(updated_fwd);
                             let local_right = desired_dir_world.dot(updated_right);
                             let max_dir_speed =
                                 heli.max_speed_for_local_dir(local_forward, local_right);
-                            let arrival_speed =
-                                ((2.0 * heli.deceleration * (dist - 0.6).max(0.0)).sqrt())
-                                    .min(max_dir_speed);
+                            let arrival_speed = ((2.0 * heli.deceleration * (dist - 0.6).max(0.0))
+                                .sqrt())
+                            .min(max_dir_speed);
                             (
                                 (local_forward * arrival_speed)
                                     .clamp(-heli.max_backward_speed, heli.max_forward_speed),
@@ -1775,15 +1789,11 @@ pub fn update_attack_helicopters(
                 } else if let Some((enemy_pos, _)) = closest_occluded_enemy {
                     rotate_heading_toward(&mut heli, enemy_pos);
                     if !heli.maintain_heading {
-                        let cur_fwd =
-                            heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+                        let cur_fwd = heli
+                            .heading
+                            .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
                         let cur_right = heli.right_dir();
-                        let candidates = [
-                            cur_right * -1.0,
-                            cur_right,
-                            cur_fwd,
-                            cur_fwd * -1.0,
-                        ];
+                        let candidates = [cur_right * -1.0, cur_right, cur_fwd, cur_fwd * -1.0];
                         'probe: for step_dist in [4.5_f32, 9.0, 14.0] {
                             for dir_cand in candidates {
                                 let probe_heli_pos = current_pos + dir_cand * step_dist;
@@ -1851,16 +1861,16 @@ pub fn update_attack_helicopters(
             .clamp(-heli.max_strafe_speed, heli.max_strafe_speed);
 
         let vel_2d = heli.velocity_2d();
-        let next_pos = (current_pos + vel_2d * dt).clamp(
-            Vec2::splat(-world_bound),
-            Vec2::splat(world_bound),
-        );
+        let next_pos =
+            (current_pos + vel_2d * dt).clamp(Vec2::splat(-world_bound), Vec2::splat(world_bound));
         heli_tf.translation.x = next_pos.x;
         heli_tf.translation.y = heli.hover_altitude;
         heli_tf.translation.z = next_pos.y;
 
         // Subtle aerodynamic pitch (forward/backward) and roll (strafing)
-        let active_forward = heli.heading.normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
+        let active_forward = heli
+            .heading
+            .normalize_or(LEVEL_4_FRIENDLY_HELICOPTER_FACING);
         let fuselage_yaw = f32::atan2(-active_forward.x, -active_forward.y);
         let pitch = -(heli.forward_speed / heli.max_forward_speed.max(1.0)) * 0.12;
         let roll = -(heli.strafe_speed / heli.max_strafe_speed.max(1.0)) * 0.14;
@@ -1960,12 +1970,8 @@ pub fn update_attack_helicopters(
                         LevelEntity,
                         Mesh3d(assets.mesh.clone()),
                         MeshMaterial3d(mat),
-                        Transform::from_xyz(
-                            muzzle_pos.x,
-                            heli.hover_altitude - 0.36,
-                            muzzle_pos.y,
-                        )
-                        .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                        Transform::from_xyz(muzzle_pos.x, heli.hover_altitude - 0.36, muzzle_pos.y)
+                            .with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
                         Bullet {
                             origin: muzzle_pos,
                             direction: shot_dir,
@@ -2127,7 +2133,9 @@ pub fn update_field_artillery(
         }
 
         // Retain living howitzer crew members; require at least 1 living crew soldier to operate the howitzer
-        artillery.crew.retain(|&c_ent| soldiers_q.get(c_ent).is_ok());
+        artillery
+            .crew
+            .retain(|&c_ent| soldiers_q.get(c_ent).is_ok());
         if artillery.crew.is_empty() {
             continue;
         }
@@ -2235,8 +2243,7 @@ pub fn update_field_artillery(
         let flight_dir = (shell.target_pos - shell.origin).normalize_or(Vec2::new(0.0, -1.0));
         let flight_yaw = f32::atan2(-flight_dir.x, -flight_dir.y);
         shell_tf.translation = Vec3::new(ground_pos.x, arc_height, ground_pos.y);
-        shell_tf.rotation =
-            Quat::from_rotation_y(flight_yaw) * Quat::from_rotation_x(-FRAC_PI_2);
+        shell_tf.rotation = Quat::from_rotation_y(flight_yaw) * Quat::from_rotation_x(-FRAC_PI_2);
 
         if shell.traveled_distance >= shell.total_distance {
             let impact_pos = shell.target_pos;
@@ -2280,6 +2287,11 @@ pub fn update_field_artillery(
                 commands.spawn((
                     LevelEntity,
                     NotShadowCaster,
+                    crate::world::ElevationDepression {
+                        center: impact_pos,
+                        radius: blast_r * 0.55,
+                        depth: 1.5,
+                    },
                     Mesh3d(crater_mesh),
                     MeshMaterial3d(crater_mat),
                     Transform::from_xyz(impact_pos.x, 0.018, impact_pos.y)
@@ -2518,7 +2530,12 @@ pub fn dismount_vehicle_crew(
     low_walls: &[(&Transform, &LowWallCollider)],
     world_bound: f32,
     crew_q: &mut Query<
-        (&mut Transform, &mut Soldier, &mut Visibility, Option<&mut Friendly>),
+        (
+            &mut Transform,
+            &mut Soldier,
+            &mut Visibility,
+            Option<&mut Friendly>,
+        ),
         (With<VehicleCrewMember>, Without<ApcVehicle>),
     >,
 ) {
@@ -2574,16 +2591,25 @@ pub fn handle_vehicle_crew_mount_commands(
     apc_order: Option<Res<ApcOrder>>,
     mut apc_q: Query<(Entity, &Transform, &Team, &mut ApcVehicle)>,
     mut crew_q: Query<
-        (&mut Transform, &mut Soldier, &mut Visibility, Option<&mut Friendly>),
+        (
+            &mut Transform,
+            &mut Soldier,
+            &mut Visibility,
+            Option<&mut Friendly>,
+        ),
         (With<VehicleCrewMember>, Without<ApcVehicle>),
     >,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
-        (With<Building>, Without<ApcVehicle>, Without<VehicleCrewMember>),
+        (
+            With<Building>,
+            Without<ApcVehicle>,
+            Without<VehicleCrewMember>,
+        ),
     >,
     low_walls_q: Query<
         (&Transform, &LowWallCollider),
-        (With<LowWall>, Without<ApcVehicle>, Without<VehicleCrewMember>),
+        (Without<ApcVehicle>, Without<VehicleCrewMember>),
     >,
 ) {
     let level = current_level.as_deref().copied().unwrap_or_default();
@@ -2612,7 +2638,12 @@ pub fn handle_vehicle_crew_mount_commands(
         }
 
         // Sync friendly APC movement order with its dedicated ApcOrder resource (independent from Infantry Squad)
-        if *v_team == Team::Player && !matches!(apc.order, VehicleOrder::DismountCrew | VehicleOrder::MountCrew) {
+        if *v_team == Team::Player
+            && !matches!(
+                apc.order,
+                VehicleOrder::DismountCrew | VehicleOrder::MountCrew
+            )
+        {
             if let Some(ref cmd_order) = apc_order {
                 match cmd_order.0 {
                     CommanderOrder::Hold => {
@@ -2816,7 +2847,7 @@ pub fn find_apc_avoidance_direction(
     desired_norm
 }
 
-/// Resolves full-hull collisions for the `3.4m × 7.6m` APC against buildings and low walls
+/// Resolves full-hull collisions for the `3.4m × 7.6m` APC against buildings, low walls, and trees
 /// using a 3-disc hull capsule (front, center, rear) along `heading`.
 pub fn resolve_apc_hull_obstacle_collision(
     mut pos: Vec2,
@@ -2827,18 +2858,52 @@ pub fn resolve_apc_hull_obstacle_collision(
 ) -> Vec2 {
     let fwd = heading.normalize_or(Vec2::new(0.0, -1.0));
     let hull_r = APC_HULL_WIDTH * 0.52;
-    for offset in [0.0, 1.9, -1.9] {
-        let disc_pos = pos + fwd * offset;
-        let resolved_disc = resolve_circle_obstacle_collision_bounded(
-            disc_pos,
-            hull_r,
-            buildings,
-            low_walls,
-            world_bound,
-        );
-        pos += resolved_disc - disc_pos;
+    for _ in 0..2 {
+        for offset in [1.9, 0.0, -1.9] {
+            let disc_pos = pos + fwd * offset;
+            let resolved_disc = resolve_circle_obstacle_collision_bounded(
+                disc_pos,
+                hull_r,
+                buildings,
+                low_walls,
+                world_bound,
+            );
+            pos += resolved_disc - disc_pos;
+        }
     }
     pos
+}
+
+/// Returns `true` if any of the APC's 3 hull discs still penetrates a building, low wall, or tree
+/// trunk collider (which occurs when the APC attempts to wedge between two trees/obstacles closer
+/// together than the APC's `3.4m` hull width).
+pub fn is_apc_hull_overlapping_obstacles(
+    pos: Vec2,
+    heading: Vec2,
+    buildings: &[(&Transform, &BuildingCollider)],
+    low_walls: &[(&Transform, &LowWallCollider)],
+) -> bool {
+    let fwd = heading.normalize_or(Vec2::new(0.0, -1.0));
+    let check_r = APC_HULL_WIDTH * 0.50 - 0.03;
+    let check_r_sq = check_r * check_r;
+    for offset in [1.9, 0.0, -1.9] {
+        let disc_pos = pos + fwd * offset;
+        for (b_tf, col) in buildings {
+            let c = Vec2::new(b_tf.translation.x, b_tf.translation.z);
+            let closest = disc_pos.clamp(c - col.half_size, c + col.half_size);
+            if (disc_pos - closest).length_squared() < check_r_sq {
+                return true;
+            }
+        }
+        for (w_tf, col) in low_walls {
+            let c = Vec2::new(w_tf.translation.x, w_tf.translation.z);
+            let closest = disc_pos.clamp(c - col.half_size, c + col.half_size);
+            if (disc_pos - closest).length_squared() < check_r_sq {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Realistic wheeled/tracked APC kinematics, obstacle & gap navigation, and 360° turret firing:
@@ -2855,22 +2920,44 @@ pub fn update_crewed_apc_vehicles(
         (Entity, &mut Transform, &Team, &mut ApcVehicle),
         (Without<ApcTurret>, Without<MountedInVehicle>),
     >,
-    mut turret_q: Query<(&ApcTurret, &mut Transform), (Without<ApcVehicle>, Without<MountedInVehicle>)>,
+    mut turret_q: Query<
+        (&ApcTurret, &mut Transform),
+        (Without<ApcVehicle>, Without<MountedInVehicle>),
+    >,
     mut mounted_crew_q: Query<
-        (&MountedInVehicle, &mut Transform, &mut Soldier, &mut Visibility),
+        (
+            &MountedInVehicle,
+            &mut Transform,
+            &mut Soldier,
+            &mut Visibility,
+        ),
         (Without<ApcVehicle>, Without<ApcTurret>),
     >,
     soldiers_q: Query<
         (&Transform, &Team),
-        (With<Soldier>, Without<ApcVehicle>, Without<ApcTurret>, Without<MountedInVehicle>),
+        (
+            With<Soldier>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<MountedInVehicle>,
+        ),
     >,
     buildings_q: Query<
         (&Transform, &BuildingCollider),
-        (With<Building>, Without<ApcVehicle>, Without<ApcTurret>, Without<MountedInVehicle>),
+        (
+            With<Building>,
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<MountedInVehicle>,
+        ),
     >,
     low_walls_q: Query<
         (&Transform, &LowWallCollider),
-        (With<LowWall>, Without<ApcVehicle>, Without<ApcTurret>, Without<MountedInVehicle>),
+        (
+            Without<ApcVehicle>,
+            Without<ApcTurret>,
+            Without<MountedInVehicle>,
+        ),
     >,
 ) {
     let dt = time.delta_secs();
@@ -2912,7 +2999,8 @@ pub fn update_crewed_apc_vehicles(
                             apc.current_speed = 0.0;
                             apc.order = VehicleOrder::Hold;
                         } else {
-                            apc.current_speed -= apc.current_speed.signum() * apc.braking_deceleration * dt;
+                            apc.current_speed -=
+                                apc.current_speed.signum() * apc.braking_deceleration * dt;
                         }
                     } else {
                         let raw_dir = to_goal / dist;
@@ -2922,7 +3010,12 @@ pub fn update_crewed_apc_vehicles(
                         let use_reverse = raw_forward_dot < -0.25
                             && dist <= 24.0
                             && !is_apc_corridor_blocked(pos, raw_dir, dist, &buildings, &low_walls)
-                            && !is_apc_corridor_hitting_friendlies(pos, raw_dir, dist, &friendly_troops);
+                            && !is_apc_corridor_hitting_friendlies(
+                                pos,
+                                raw_dir,
+                                dist,
+                                &friendly_troops,
+                            );
 
                         let desired_dir = if use_reverse {
                             raw_dir
@@ -2965,10 +3058,12 @@ pub fn update_crewed_apc_vehicles(
                                 } else {
                                     apc.reverse_acceleration
                                 };
-                                apc.current_speed = (apc.current_speed - decel * dt).max(target_speed);
-                            } else {
                                 apc.current_speed =
-                                    (apc.current_speed + apc.braking_deceleration * dt).min(target_speed);
+                                    (apc.current_speed - decel * dt).max(target_speed);
+                            } else {
+                                apc.current_speed = (apc.current_speed
+                                    + apc.braking_deceleration * dt)
+                                    .min(target_speed);
                             }
 
                             // Rear-end steering alignment while backing up
@@ -2986,7 +3081,8 @@ pub fn update_crewed_apc_vehicles(
                         } else {
                             // Forward gear with realistic turning radius and braking curve
                             let turn_error = right_dot.atan2(forward_dot);
-                            let sharp_turn_slowdown = if turn_error.abs() > 0.65 { 0.48 } else { 1.0 };
+                            let sharp_turn_slowdown =
+                                if turn_error.abs() > 0.65 { 0.48 } else { 1.0 };
                             let mut target_speed = if dist <= stop_dist {
                                 (dist * 1.4).min(apc.max_forward_speed * 0.35)
                             } else {
@@ -3002,7 +3098,8 @@ pub fn update_crewed_apc_vehicles(
                                 } else {
                                     apc.acceleration
                                 };
-                                apc.current_speed = (apc.current_speed + accel * dt).min(target_speed);
+                                apc.current_speed =
+                                    (apc.current_speed + accel * dt).min(target_speed);
                             } else {
                                 apc.current_speed = (apc.current_speed
                                     - apc.braking_deceleration * dt)
@@ -3041,7 +3138,12 @@ pub fn update_crewed_apc_vehicles(
         }
 
         if apc.current_speed.abs() > 0.0001 {
-            let next_pos = pos + heading * apc.current_speed * dt;
+            let slope_mult = crate::world::elevation_movement_multiplier(
+                pos,
+                heading * apc.current_speed.signum(),
+                level,
+            );
+            let next_pos = pos + heading * (apc.current_speed * slope_mult) * dt;
             let resolved = resolve_apc_hull_obstacle_collision(
                 next_pos,
                 heading,
@@ -3049,10 +3151,18 @@ pub fn update_crewed_apc_vehicles(
                 &low_walls,
                 world_bound,
             );
-            if (resolved - next_pos).length_squared() > 0.04 {
-                apc.current_speed *= 0.35;
+            // If `resolved` is still pinched between two closely spaced obstacles (such as forest
+            // trees spaced narrower than the 3.4m APC hull), reject the step into the narrow gap.
+            if is_apc_hull_overlapping_obstacles(resolved, heading, &buildings, &low_walls)
+                && !is_apc_hull_overlapping_obstacles(pos, heading, &buildings, &low_walls)
+            {
+                apc.current_speed = 0.0;
+            } else {
+                if (resolved - next_pos).length_squared() > 0.04 {
+                    apc.current_speed *= 0.35;
+                }
+                pos = resolved;
             }
-            pos = resolved;
         }
 
         apc.heading = heading;
@@ -3140,8 +3250,7 @@ pub fn update_crewed_apc_vehicles(
             let updated_turret_dir = apc.turret_world_dir();
             if let Some((enemy_pos, _)) = nearest_visible_enemy {
                 let aim_dir = (enemy_pos - pos).normalize_or(updated_turret_dir);
-                if updated_turret_dir.dot(aim_dir) >= 0.95 && apc.turret_shoot_timer.is_finished()
-                {
+                if updated_turret_dir.dot(aim_dir) >= 0.95 && apc.turret_shoot_timer.is_finished() {
                     apc.turret_shoot_timer.reset();
                     let muzzle_pos =
                         pos + updated_turret_dir * (APC_TURRET_RADIUS + APC_BARREL_LENGTH);
@@ -3227,8 +3336,18 @@ pub fn update_dismounted_crew_return(
         ),
         (Without<MountedInVehicle>, Without<ApcVehicle>),
     >,
-    buildings_q: Query<(&Transform, &BuildingCollider), (With<Building>, Without<ApcVehicle>, Without<VehicleCrewMember>)>,
-    low_walls_q: Query<(&Transform, &LowWallCollider), (With<LowWall>, Without<ApcVehicle>, Without<VehicleCrewMember>)>,
+    buildings_q: Query<
+        (&Transform, &BuildingCollider),
+        (
+            With<Building>,
+            Without<ApcVehicle>,
+            Without<VehicleCrewMember>,
+        ),
+    >,
+    low_walls_q: Query<
+        (&Transform, &LowWallCollider),
+        (Without<ApcVehicle>, Without<VehicleCrewMember>),
+    >,
 ) {
     let dt = time.delta_secs();
     let level = current_level.as_deref().copied().unwrap_or_default();
@@ -3270,7 +3389,9 @@ pub fn update_dismounted_crew_return(
                     VehicleCrewRole::Driver => apc.driver = Some(c_ent),
                     VehicleCrewRole::Gunner => apc.gunner = Some(c_ent),
                     VehicleCrewRole::Passenger => {
-                        if !apc.passengers.contains(&c_ent) && apc.passengers.len() < apc.max_passengers {
+                        if !apc.passengers.contains(&c_ent)
+                            && apc.passengers.len() < apc.max_passengers
+                        {
                             apc.passengers.push(c_ent);
                         }
                     }
@@ -3312,7 +3433,11 @@ pub fn resolve_soldier_apc_collisions(
     apc_q: Query<(&Transform, &ApcVehicle), Without<Soldier>>,
     mut soldiers_q: Query<
         (Entity, &mut Transform, &Team),
-        (With<Soldier>, Without<MountedInVehicle>, Without<ApcVehicle>),
+        (
+            With<Soldier>,
+            Without<MountedInVehicle>,
+            Without<ApcVehicle>,
+        ),
     >,
 ) {
     let r = SOLDIER_RADIUS;
@@ -3477,7 +3602,10 @@ mod tests {
                 apc.is_fully_crewed(),
                 "APC must spawn with both Driver and Gunner mounted inside"
             );
-            assert_eq!(apc.hull_half_size, Vec2::new(APC_HULL_WIDTH * 0.5, APC_HULL_LENGTH * 0.5));
+            assert_eq!(
+                apc.hull_half_size,
+                Vec2::new(APC_HULL_WIDTH * 0.5, APC_HULL_LENGTH * 0.5)
+            );
             assert!((tf.translation.z - LEVEL_4_FRIENDLY_APC_SPAWN_POS.y).abs() < 0.1);
         }
         assert_eq!(apc_count, 1, "Level 4 should spawn 1 friendly APC");
@@ -3487,7 +3615,10 @@ mod tests {
             .query::<&ApcTurret>()
             .iter(app.world())
             .count();
-        assert_eq!(turret_count, 1, "APC must have a circular 360-degree rotating turret");
+        assert_eq!(
+            turret_count, 1,
+            "APC must have a circular 360-degree rotating turret"
+        );
     }
 
     #[test]
@@ -3515,7 +3646,12 @@ mod tests {
             app.update();
         }
 
-        let mid_z = app.world().get::<Transform>(apc_entity).unwrap().translation.z;
+        let mid_z = app
+            .world()
+            .get::<Transform>(apc_entity)
+            .unwrap()
+            .translation
+            .z;
         let apc_after_fwd = app.world().get::<ApcVehicle>(apc_entity).unwrap();
         assert!(
             mid_z < 185.0,
@@ -3544,7 +3680,12 @@ mod tests {
             app.update();
         }
 
-        let rev_z = app.world().get::<Transform>(apc_entity).unwrap().translation.z;
+        let rev_z = app
+            .world()
+            .get::<Transform>(apc_entity)
+            .unwrap()
+            .translation
+            .z;
         let apc_after_rev = app.world().get::<ApcVehicle>(apc_entity).unwrap();
         assert!(
             rev_z > mid_z + 4.0,
@@ -3584,17 +3725,28 @@ mod tests {
 
         {
             let apc = app.world().get::<ApcVehicle>(apc_entity).unwrap();
-            assert!(!apc.has_driver() && !apc.has_gunner(), "Driver and Gunner should have exited the APC");
+            assert!(
+                !apc.has_driver() && !apc.has_gunner(),
+                "Driver and Gunner should have exited the APC"
+            );
         }
         let dismounted_count = app
             .world_mut()
             .query_filtered::<Entity, (With<VehicleCrewMember>, Without<MountedInVehicle>)>()
             .iter(app.world())
             .count();
-        assert_eq!(dismounted_count, 2, "Both Driver and Gunner should be dismounted on foot");
+        assert_eq!(
+            dismounted_count, 2,
+            "Both Driver and Gunner should be dismounted on foot"
+        );
 
         // Verify uncrewed APC cannot drive when ordered to MoveTo while Driver is dismounted
-        let z_before = app.world().get::<Transform>(apc_entity).unwrap().translation.z;
+        let z_before = app
+            .world()
+            .get::<Transform>(apc_entity)
+            .unwrap()
+            .translation
+            .z;
         {
             let mut apc = app.world_mut().get_mut::<ApcVehicle>(apc_entity).unwrap();
             apc.order = VehicleOrder::MoveTo(Vec2::new(0.0, 150.0));
@@ -3604,7 +3756,12 @@ mod tests {
             time.advance_by(std::time::Duration::from_millis(50));
             app.update();
         }
-        let z_after = app.world().get::<Transform>(apc_entity).unwrap().translation.z;
+        let z_after = app
+            .world()
+            .get::<Transform>(apc_entity)
+            .unwrap()
+            .translation
+            .z;
         assert!(
             (z_after - z_before).abs() < 0.01,
             "APC without a mounted Driver must not move"
@@ -3641,8 +3798,10 @@ mod tests {
             .unwrap();
 
         // Place APC at (0.0, 60.0) facing North and place a building at (0.0, 38.0) blocking the direct path to (0.0, 14.0)
-        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
-            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 60.0);
+        app.world_mut()
+            .get_mut::<Transform>(apc_entity)
+            .unwrap()
+            .translation = Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 60.0);
         app.world_mut().spawn((
             Building,
             BuildingCollider {
@@ -3723,8 +3882,10 @@ mod tests {
             .query_filtered::<Entity, With<ApcVehicle>>()
             .single(app.world())
             .unwrap();
-        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
-            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 58.0);
+        app.world_mut()
+            .get_mut::<Transform>(apc_entity)
+            .unwrap()
+            .translation = Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 58.0);
         {
             let mut apc = app.world_mut().get_mut::<ApcVehicle>(apc_entity).unwrap();
             apc.order = VehicleOrder::MoveTo(Vec2::new(0.0, 20.0));
@@ -3735,7 +3896,13 @@ mod tests {
             let mut time = app.world_mut().resource_mut::<Time>();
             time.advance_by(std::time::Duration::from_millis(50));
             app.update();
-            let x = app.world().get::<Transform>(apc_entity).unwrap().translation.x.abs();
+            let x = app
+                .world()
+                .get::<Transform>(apc_entity)
+                .unwrap()
+                .translation
+                .x
+                .abs();
             if x > max_lateral_detour_x {
                 max_lateral_detour_x = x;
             }
@@ -3766,8 +3933,10 @@ mod tests {
             .query_filtered::<Entity, With<ApcVehicle>>()
             .single(app.world())
             .unwrap();
-        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
-            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 50.0);
+        app.world_mut()
+            .get_mut::<Transform>(apc_entity)
+            .unwrap()
+            .translation = Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 50.0);
 
         // Spawn an enemy soldier at (6.0, 34.0) inside the APC's forward/turret view
         app.world_mut().spawn((
@@ -3787,11 +3956,7 @@ mod tests {
             app.update();
         }
 
-        let bullets_fired = app
-            .world_mut()
-            .query::<&Bullet>()
-            .iter(app.world())
-            .count();
+        let bullets_fired = app.world_mut().query::<&Bullet>().iter(app.world()).count();
         assert!(
             bullets_fired > 0,
             "APC turret with mounted Gunner should slew onto and fire at enemy in view"
@@ -3809,8 +3974,10 @@ mod tests {
             .query_filtered::<Entity, With<ApcVehicle>>()
             .single(app.world())
             .unwrap();
-        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
-            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 60.0);
+        app.world_mut()
+            .get_mut::<Transform>(apc_entity)
+            .unwrap()
+            .translation = Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 60.0);
 
         // Spawn a friendly infantry soldier standing at (0.0, 44.0) directly on the road between the APC and (0.0, 20.0)
         let friendly_entity = app
@@ -3867,8 +4034,10 @@ mod tests {
             .query_filtered::<Entity, With<ApcVehicle>>()
             .single(app.world())
             .unwrap();
-        app.world_mut().get_mut::<Transform>(apc_entity).unwrap().translation =
-            Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 50.0);
+        app.world_mut()
+            .get_mut::<Transform>(apc_entity)
+            .unwrap()
+            .translation = Vec3::new(0.0, APC_HULL_HEIGHT * 0.5, 50.0);
 
         // Spawn an enemy soldier directly in the APC's path at (0.0, 38.0)
         let enemy_entity = app
@@ -4018,7 +4187,10 @@ mod tests {
                 .unwrap()
                 .translation = Vec3::new(start_pos.x, HELICOPTER_HOVER_ALTITUDE, start_pos.y);
             {
-                let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+                let mut heli = app
+                    .world_mut()
+                    .get_mut::<AttackHelicopter>(heli_entity)
+                    .unwrap();
                 heli.heading = Vec2::new(0.0, -1.0); // Facing North (-Z)
                 heli.maintain_heading = true;
                 heli.order = VehicleOrder::MoveTo(start_pos + target_offset);
@@ -4146,7 +4318,10 @@ mod tests {
 
         // Lock heading first to verify the autocannon's mechanical ±70° stop in isolation
         {
-            let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+            let mut heli = app
+                .world_mut()
+                .get_mut::<AttackHelicopter>(heli_entity)
+                .unwrap();
             heli.heading = Vec2::new(0.0, -1.0);
             heli.maintain_heading = true;
         }
@@ -4177,11 +4352,7 @@ mod tests {
             heli.cannon_yaw_local,
             heli.cannon_max_yaw_rad
         );
-        let bullets_at_rear_enemy = app
-            .world_mut()
-            .query::<&Bullet>()
-            .iter(app.world())
-            .count();
+        let bullets_at_rear_enemy = app.world_mut().query::<&Bullet>().iter(app.world()).count();
         assert_eq!(
             bullets_at_rear_enemy, 0,
             "Helicopter chin autocannon must not fire at enemies behind its limited forward arc while heading is locked"
@@ -4190,7 +4361,10 @@ mod tests {
         // Now unlock heading (`maintain_heading = false`) while holding position: the helicopter
         // should rotate itself toward the detected enemy at (12.0, 80.0) to get in firing position and open fire!
         {
-            let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+            let mut heli = app
+                .world_mut()
+                .get_mut::<AttackHelicopter>(heli_entity)
+                .unwrap();
             heli.maintain_heading = false;
         }
         for _ in 0..30 {
@@ -4209,11 +4383,7 @@ mod tests {
             rotated_heli.heading,
             expected_dir
         );
-        let bullets_after_reposition = app
-            .world_mut()
-            .query::<&Bullet>()
-            .iter(app.world())
-            .count();
+        let bullets_after_reposition = app.world_mut().query::<&Bullet>().iter(app.world()).count();
         assert!(
             bullets_after_reposition > 0,
             "Helicopter should fire once it has rotated into firing position while holding"
@@ -4239,7 +4409,10 @@ mod tests {
             .unwrap()
             .translation = Vec3::new(start_pos.x, HELICOPTER_HOVER_ALTITUDE, start_pos.y);
         {
-            let mut heli = app.world_mut().get_mut::<AttackHelicopter>(heli_entity).unwrap();
+            let mut heli = app
+                .world_mut()
+                .get_mut::<AttackHelicopter>(heli_entity)
+                .unwrap();
             heli.heading = Vec2::new(0.0, -1.0); // Initially facing due North
             heli.order = VehicleOrder::MoveTo(target_pos);
         }
@@ -4315,9 +4488,23 @@ mod tests {
         assert_eq!(barrel.artillery, art_entity);
 
         // Verify the 4 howitzer operating crew soldiers standing behind the howitzer, armed with rifles and vision cones
-        let crew_members: Vec<(Entity, &ArtilleryCrewMember, &Transform, &Soldier, &Friendly, &Children)> = app
+        let crew_members: Vec<(
+            Entity,
+            &ArtilleryCrewMember,
+            &Transform,
+            &Soldier,
+            &Friendly,
+            &Children,
+        )> = app
             .world_mut()
-            .query::<(Entity, &ArtilleryCrewMember, &Transform, &Soldier, &Friendly, &Children)>()
+            .query::<(
+                Entity,
+                &ArtilleryCrewMember,
+                &Transform,
+                &Soldier,
+                &Friendly,
+                &Children,
+            )>()
             .iter(app.world())
             .collect();
         assert_eq!(
@@ -4352,7 +4539,8 @@ mod tests {
     }
 
     #[test]
-    fn test_field_artillery_rotates_slowly_and_fires_across_entire_map_exploding_in_medium_circle_when_squad_leader_calls_support() {
+    fn test_field_artillery_rotates_slowly_and_fires_across_entire_map_exploding_in_medium_circle_when_squad_leader_calls_support()
+     {
         let mut app = create_vehicle_test_app();
         app.add_systems(Startup, setup_level_vehicles);
         app.update();
@@ -4459,12 +4647,11 @@ mod tests {
             let mut doctrine = app
                 .world_mut()
                 .resource_mut::<crate::friendly::SquadDoctrineState>();
-            doctrine.entry_mut(0).phase =
-                crate::friendly::SquadTacticalPhase::DecisionActive(
-                    crate::friendly::SquadLeaderDecision::FixAndSupport {
-                        target_center: support_coords,
-                    },
-                );
+            doctrine.entry_mut(0).phase = crate::friendly::SquadTacticalPhase::DecisionActive(
+                crate::friendly::SquadLeaderDecision::FixAndSupport {
+                    target_center: support_coords,
+                },
+            );
         }
 
         // 1. After 0.25s (5 ticks), the artillery should still be rotating very slowly on its axis
@@ -4545,10 +4732,7 @@ mod tests {
     fn test_howitzer_crew_vision_cones_reveal_fog_of_war_and_engage_with_rifles() {
         let mut app = create_vehicle_test_app();
         app.init_resource::<Assets<crate::fog::FogMaterial>>();
-        app.add_systems(
-            Startup,
-            (crate::fog::setup_fog, setup_level_vehicles),
-        );
+        app.add_systems(Startup, (crate::fog::setup_fog, setup_level_vehicles));
         app.add_systems(
             Update,
             (
@@ -4619,14 +4803,125 @@ mod tests {
         );
 
         // Verify the howitzer crew fires their rifles at the visible enemy
-        let rifle_bullets = app
-            .world_mut()
-            .query::<&Bullet>()
-            .iter(app.world())
-            .count();
+        let rifle_bullets = app.world_mut().query::<&Bullet>().iter(app.world()).count();
         assert!(
             rifle_bullets > 0,
             "Howitzer crew soldiers armed with rifles should fire at an enemy inside their vision cone"
+        );
+    }
+
+    #[test]
+    fn test_level_4_forest_blocks_apc_but_allows_infantry_to_walk_through() {
+        let mut app = create_vehicle_test_app();
+        app.insert_resource(crate::common::types::SquadCommand::Formation);
+        let far_east_goal = Vec2::new(78.0, 2.5);
+        app.insert_resource(CommanderOrder::TakePosition(far_east_goal));
+        app.add_systems(Startup, crate::world::setup_level_world);
+        app.add_systems(Update, crate::friendly::update_friendly);
+        app.update();
+
+        // 1. Verify the forest patch spawned on the right (+X) side of the Level 4 map with collision
+        let tree_count = app
+            .world_mut()
+            .query_filtered::<(&Transform, &LowWallCollider), With<crate::world::Tree>>()
+            .iter(app.world())
+            .map(|(tf, col)| {
+                assert!(
+                    tf.translation.x > 45.0,
+                    "Forest tree should be on the right (+X) side of Level 4 map, got x={}",
+                    tf.translation.x
+                );
+                assert!(
+                    col.half_size.x > 0.2 && col.half_size.y > 0.2,
+                    "Each tree must have a trunk collider"
+                );
+            })
+            .count();
+        assert!(
+            tree_count >= 80,
+            "Expected dense forest patch on the right side of Level 4, got {} trees",
+            tree_count
+        );
+
+        // 2. Spawn an APC just west of the forest (`x = 43.0, z = 2.5`) facing East `(1, 0)` and
+        //    order it to drive to `far_east_goal = (78.0, 2.5)` (straight through the forest)
+        let apc_entity = {
+            let mut commands = app.world_mut().commands();
+            let mut meshes = Assets::<Mesh>::default();
+            let mut materials = Assets::<StandardMaterial>::default();
+            let (apc_ent, _, _) = spawn_apc_with_crew(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                Team::Player,
+                Vec2::new(43.0, 2.5),
+                Vec2::new(1.0, 0.0),
+            );
+            apc_ent
+        };
+        app.update();
+        app.world_mut()
+            .get_mut::<ApcVehicle>(apc_entity)
+            .unwrap()
+            .order = VehicleOrder::MoveTo(Vec2::new(60.0, 2.5));
+
+        // 3. Spawn an infantry squad leader just west of the forest (`x = 45.5, z = 2.5`)
+        //    ordered to walk straight through the forest to `far_east_goal = (78.0, 2.5)`
+        let infantry_ent = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(45.5, 0.05, 2.5),
+                Friendly {
+                    fireteam: 1,
+                    slot: 0,
+                    state: FriendlyAiState::Follow,
+                    shoot_timer: Timer::from_seconds(0.2, TimerMode::Repeating),
+                    speed: 10.0,
+                    vision_range: 24.0,
+                    vision_half_angle: 45.0_f32.to_radians(),
+                    inner_radius: 2.0,
+                    target_pos: None,
+                    target_lost_timer: 0.0,
+                },
+                Team::Player,
+                crate::friendly::SquadId(0),
+                Soldier {
+                    facing_dir: Vec2::new(1.0, 0.0),
+                    shoot_cooldown: Timer::from_seconds(0.2, TimerMode::Once),
+                    stance: Stance::Standing,
+                    inventory: crate::common::types::Inventory::default(),
+                },
+                Suppression::default(),
+            ))
+            .id();
+
+        let mut apc_entered_forest_interior = false;
+        for _ in 0..120 {
+            let mut time = app.world_mut().resource_mut::<Time>();
+            time.advance_by(std::time::Duration::from_millis(50));
+            app.update();
+
+            let apc_tf = app.world().get::<Transform>(apc_entity).unwrap();
+            // Forest interior spans `X in [50.0, 72.0], Z in [-16.0, 24.0]`
+            if apc_tf.translation.x > 50.0
+                && apc_tf.translation.x < 72.0
+                && apc_tf.translation.z > -16.0
+                && apc_tf.translation.z < 24.0
+            {
+                apc_entered_forest_interior = true;
+            }
+        }
+
+        assert!(
+            !apc_entered_forest_interior,
+            "APC must not be able to drive through the dense forest interior"
+        );
+
+        let inf_tf = app.world().get::<Transform>(infantry_ent).unwrap();
+        assert!(
+            inf_tf.translation.x > 73.0,
+            "Infantry soldier should be able to walk right through the forest to the far side (x > 73.0), got {:?}",
+            inf_tf.translation
         );
     }
 }

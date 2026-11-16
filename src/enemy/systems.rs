@@ -11,8 +11,10 @@ use crate::common::types::{
 use crate::enemy::ai::{ENEMY_WAYPOINTS, Enemy, EnemyAiState, Zombie};
 use crate::fog::mesh::create_vision_cone_mesh;
 use crate::player::Player;
+#[cfg(test)]
+use crate::world::buildings::LowWall;
 use crate::world::buildings::{
-    Building, BuildingCollider, COMPOUND_BUILDINGS, COMPOUND_LOW_WALLS, LowWall, LowWallCollider,
+    Building, BuildingCollider, COMPOUND_BUILDINGS, COMPOUND_LOW_WALLS, LowWallCollider,
 };
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
@@ -528,7 +530,6 @@ pub fn update_enemy(
     low_walls_q: Query<
         (&Transform, &LowWallCollider),
         (
-            With<LowWall>,
             Without<Player>,
             Without<Enemy>,
             Without<crate::friendly::Friendly>,
@@ -1099,7 +1100,6 @@ pub fn update_zombies(
     low_walls_q: Query<
         (&Transform, &LowWallCollider),
         (
-            With<LowWall>,
             Without<Zombie>,
             Without<Player>,
             Without<Enemy>,
@@ -2499,7 +2499,10 @@ mod tests {
 
         let sup = app.world().get::<Suppression>(enemy_entity).unwrap();
         let soldier = app.world().get::<Soldier>(enemy_entity).unwrap();
-        assert!(sup.is_suppressed(), "Enemy should be suppressed by the incoming volley");
+        assert!(
+            sup.is_suppressed(),
+            "Enemy should be suppressed by the incoming volley"
+        );
         assert_eq!(
             soldier.stance,
             Stance::Crouching,
@@ -2534,7 +2537,10 @@ mod tests {
         app.update();
 
         let sup = app.world().get::<Suppression>(enemy_entity).unwrap();
-        assert!(!sup.is_suppressed(), "Suppression should decay after incoming fire stops");
+        assert!(
+            !sup.is_suppressed(),
+            "Suppression should decay after incoming fire stops"
+        );
 
         let enemy_bullets_after = app
             .world_mut()

@@ -8,9 +8,8 @@ vehicle components and damage system
 fighter plane model
 fighter plane combat and AI
 fire team loadout differences
-artillery model
 artillery combat and AI
-trenches
+trenchess
 scenario editor: 
     choose map
     add units to map (nato symbols)
@@ -18,12 +17,12 @@ scenario editor:
     combat maneuvers
     launch scenario
 destructible environment:
-    craters
+    craters (can be used as cover)
     trees get destroyed
     buildings collapse
 fire and smoke
 terrain features:
-    forest
+    forest: canopy; cover from bullets
     river
     elevation
 terrain type affects movement speed

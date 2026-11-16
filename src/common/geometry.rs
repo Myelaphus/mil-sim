@@ -160,7 +160,7 @@ pub fn resolve_soldier_pairwise_collisions(
         ),
     >,
     buildings_q: Query<(&Transform, &BuildingCollider), (With<crate::world::buildings::Building>, Without<crate::common::types::Soldier>)>,
-    low_walls_q: Query<(&Transform, &LowWallCollider), (With<crate::world::buildings::LowWall>, Without<crate::common::types::Soldier>)>,
+    low_walls_q: Query<(&Transform, &LowWallCollider), Without<crate::common::types::Soldier>>,
 ) {
     let world_bound = if current_level.as_deref().copied().unwrap_or_default() == CurrentLevel::Level4 {
         RTS_SOLDIER_WORLD_BOUND
@@ -229,6 +229,44 @@ pub const AERIAL_BUILDING_SHADOW_MIN: f32 = 4.0;
 pub const AERIAL_BUILDING_SHADOW_MAX: f32 = 9.5;
 pub const AERIAL_BUILDING_SHADOW_RATIO: f32 = 0.45;
 
+/// Returns `true` if the 3D sightline from `observer_pos` (eye height `+1.5m` above local terrain)
+/// to `target_pos` (body height `+1.2m` above local terrain) is occluded by intermediate terrain
+/// elevation (such as the Western Ridgeline crest blocking vision onto the reverse slope).
+pub fn is_sightline_blocked_by_ridgeline(observer_pos: Vec2, target_pos: Vec2) -> bool {
+    let min_x = observer_pos.x.min(target_pos.x);
+    let max_x = observer_pos.x.max(target_pos.x);
+    let min_z = observer_pos.y.min(target_pos.y);
+    let max_z = observer_pos.y.max(target_pos.y);
+
+    if min_x >= crate::world::RIDGE_EAST_TOE_X
+        || max_x <= crate::world::RIDGE_WEST_TOE_X
+        || min_z
+            >= crate::world::RIDGE_Z_CENTER
+                + crate::world::RIDGE_Z_FLAT_HALF
+                + crate::world::RIDGE_Z_SHOULDER
+        || max_z
+            <= crate::world::RIDGE_Z_CENTER
+                - crate::world::RIDGE_Z_FLAT_HALF
+                - crate::world::RIDGE_Z_SHOULDER
+    {
+        return false;
+    }
+
+    let obs_eye_y = crate::world::base_terrain_elevation(observer_pos) + 1.5;
+    let tgt_body_y = crate::world::base_terrain_elevation(target_pos) + 1.2;
+
+    for t in [0.14_f32, 0.28, 0.42, 0.57, 0.71, 0.86] {
+        let sample_pos = observer_pos.lerp(target_pos, t);
+        let ray_y = obs_eye_y + (tgt_body_y - obs_eye_y) * t;
+        let terrain_y = crate::world::base_terrain_elevation(sample_pos);
+        if terrain_y > ray_y + 0.15 {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn can_see_target(
     seer_pos: Vec2,
     seer_dir: Vec2,
@@ -240,8 +278,10 @@ pub fn can_see_target(
 ) -> bool {
     let to_point = target_pos - seer_pos;
     let dist = to_point.length();
+    let seer_elev = crate::world::base_terrain_elevation(seer_pos);
+    let effective_range = vision_range + crate::world::elevation_vision_range_bonus(seer_elev);
 
-    if dist > vision_range {
+    if dist > effective_range {
         return false;
     }
 
@@ -267,6 +307,10 @@ pub fn can_see_target(
         if line_intersects_box(seer_pos, target_pos, b_min, b_max) {
             return false;
         }
+    }
+
+    if is_sightline_blocked_by_ridgeline(seer_pos, target_pos) {
+        return false;
     }
 
     true
@@ -764,6 +808,9 @@ pub fn has_clear_shot_past_cover(
         if line_intersects_box(shooter_pos, target_pos, min, max) {
             return false;
         }
+    }
+    if is_sightline_blocked_by_ridgeline(shooter_pos, target_pos) {
+        return false;
     }
     true
 }

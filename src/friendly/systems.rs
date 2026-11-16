@@ -16,7 +16,9 @@ use crate::friendly::ai::{
     SquadTacticalPhase, select_squad_commander,
 };
 use crate::player::Player;
-use crate::world::buildings::{Building, BuildingCollider, LowWall, LowWallCollider};
+#[cfg(test)]
+use crate::world::buildings::LowWall;
+use crate::world::buildings::{Building, BuildingCollider, LowWallCollider};
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
@@ -435,12 +437,7 @@ pub fn update_friendly(
     >,
     low_walls_q: Query<
         (&Transform, &LowWallCollider),
-        (
-            With<LowWall>,
-            Without<Friendly>,
-            Without<Player>,
-            Without<Enemy>,
-        ),
+        (Without<Friendly>, Without<Player>, Without<Enemy>),
     >,
     bullets_q: Query<
         (&Transform, &Bullet),
@@ -1474,13 +1471,14 @@ pub fn update_friendly(
                                                     side * (5.2 + flank_slot as f32 * 0.85),
                                                     (flank_slot as f32 - 2.0) * 1.4,
                                                 );
-                                            let res_goal = resolve_circle_obstacle_collision_bounded(
-                                                raw_goal,
-                                                soldier_radius,
-                                                &buildings,
-                                                &low_walls,
-                                                world_bound,
-                                            );
+                                            let res_goal =
+                                                resolve_circle_obstacle_collision_bounded(
+                                                    raw_goal,
+                                                    soldier_radius,
+                                                    &buildings,
+                                                    &low_walls,
+                                                    world_bound,
+                                                );
                                             route_around_obstacles(
                                                 friendly_pos,
                                                 res_goal,
@@ -1575,8 +1573,8 @@ pub fn update_friendly(
                                 let has_active_enemy_contact = !visible_enemies.is_empty()
                                     || under_fire_source.is_some()
                                     || shared_squad_contact.is_some();
-                                let watch_dir = (Vec2::ZERO - rally_point)
-                                    .normalize_or(Vec2::new(0.0, -1.0));
+                                let watch_dir =
+                                    (Vec2::ZERO - rally_point).normalize_or(Vec2::new(0.0, -1.0));
                                 let member_bound_ft = if friendly.fireteam == 0 {
                                     1
                                 } else {
@@ -2321,6 +2319,13 @@ pub fn update_friendly(
                         }
                     };
 
+                    let target_spot = resolve_circle_obstacle_collision_bounded(
+                        target_spot,
+                        soldier_radius + 0.12,
+                        &buildings,
+                        &low_walls,
+                        world_bound,
+                    );
                     let to_spot = target_spot - friendly_pos;
                     let dist_to_spot = to_spot.length();
                     if dist_to_spot > 0.85 {
@@ -2346,7 +2351,9 @@ pub fn update_friendly(
                             1.0
                         };
                         let dir_mult = directional_speed_multiplier(soldier.facing_dir, move_dir);
-                        let speed = friendly.speed * catch_up * dir_mult;
+                        let slope_mult =
+                            crate::world::elevation_movement_multiplier(friendly_pos, move_dir, level);
+                        let speed = friendly.speed * catch_up * dir_mult * slope_mult;
                         let next_pos = friendly_pos + move_dir * speed * dt;
                         let resolved = resolve_circle_obstacle_collision_bounded(
                             next_pos,
@@ -4507,11 +4514,7 @@ mod tests {
             app.update();
         }
 
-        let bullets_fired = app
-            .world_mut()
-            .query::<&Bullet>()
-            .iter(app.world())
-            .count();
+        let bullets_fired = app.world_mut().query::<&Bullet>().iter(app.world()).count();
         assert_eq!(
             bullets_fired, 0,
             "Surviving soldier at BreakContact rally point with no visible enemy contact must hold fire instead of shooting into nothing"

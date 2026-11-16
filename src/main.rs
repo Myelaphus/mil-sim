@@ -118,6 +118,7 @@ mod tests {
                 vehicle::update_field_artillery,
                 combat::update_bullets,
                 enemy::update_enemy_visibility,
+                world::sync_elevation_visual_scale,
                 resolve_soldier_pairwise_collisions,
                 world::update_camera,
                 ui::update_fps,

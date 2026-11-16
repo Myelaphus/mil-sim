@@ -148,9 +148,55 @@ fn ray_intersects_box_aerial(origin: vec2<f32>, p_target: vec2<f32>, b: vec4<f32
     return false;
 }
 
+// Analytical terrain elevation (m) for the Western Ridgeline on the left (-X) side of Level 4 (`X in [-96.0, -44.0]`).
+fn terrain_elevation(p: vec2<f32>) -> f32 {
+    if (p.x <= -96.0 || p.x >= -44.0) {
+        return 0.0;
+    }
+    var u = 0.0;
+    if (p.x >= -68.0) {
+        u = (p.x - (-68.0)) / 24.0;
+    } else {
+        u = (-68.0 - p.x) / 28.0;
+    }
+    let vz = max(abs(p.y - (-5.0)) - 42.0, 0.0) / 26.0;
+    if (u >= 1.0 || vz >= 1.0) {
+        return 0.0;
+    }
+    let ux = 1.0 - u * u;
+    let uz = 1.0 - vz * vz;
+    return 7.0 * (ux * ux) * (uz * uz);
+}
+
+// 3D ridgeline line-of-sight occlusion between ground spotter `origin` (+1.5m eye) and `p_target` (+1.2m height).
+fn ray_intersects_ridgeline(origin: vec2<f32>, p_target: vec2<f32>) -> bool {
+    let min_x = min(origin.x, p_target.x);
+    let max_x = max(origin.x, p_target.x);
+    let min_z = min(origin.y, p_target.y);
+    let max_z = max(origin.y, p_target.y);
+    if (min_x >= -44.0 || max_x <= -96.0 || min_z >= 63.0 || max_z <= -73.0) {
+        return false;
+    }
+    let obs_eye_y = terrain_elevation(origin) + 1.5;
+    let tgt_body_y = terrain_elevation(p_target) + 1.2;
+    let ts = array<f32, 6>(0.14, 0.28, 0.42, 0.57, 0.71, 0.86);
+    for (var k = 0u; k < 6u; k = k + 1u) {
+        let t = ts[k];
+        let sample_pos = mix(origin, p_target, t);
+        let ray_y = obs_eye_y + (tgt_body_y - obs_eye_y) * t;
+        let terr_y = terrain_elevation(sample_pos);
+        if (terr_y > ray_y + 0.15) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn compute_spotter_visibility(world_xz: vec2<f32>, s_pos: vec2<f32>, s_dir: vec2<f32>) -> f32 {
     let is_aerial = length(s_dir) > 1.5;
-    let spotter_range = select(material.vision_range, 38.0, is_aerial);
+    let s_elev = max(terrain_elevation(s_pos), 0.0);
+    let ground_range = material.vision_range + s_elev * 1.0;
+    let spotter_range = select(ground_range, 38.0, is_aerial);
     let spotter_angle = select(material.vision_angle, 0.6108652, is_aerial);
 
     let to_frag = world_xz - s_pos;
@@ -177,17 +223,22 @@ fn compute_spotter_visibility(world_xz: vec2<f32>, s_pos: vec2<f32>, s_dir: vec2
     // Base visibility without obstacles
     var vis = clamp(max(cone_visibility, inner_visibility), 0.0, 1.0);
 
-    // 4. Line-of-sight obstruction check against buildings
+    // 4. Line-of-sight obstruction check against buildings and ridgeline terrain
     if (vis > 0.0) {
-        for (var i = 0u; i < material.building_count; i = i + 1u) {
-            let blocked = select(
-                ray_intersects_box(s_pos, world_xz, material.buildings[i]),
-                ray_intersects_box_aerial(s_pos, world_xz, material.buildings[i]),
-                is_aerial
-            );
-            if (blocked) {
-                vis = 0.0;
-                break;
+        if (!is_aerial && ray_intersects_ridgeline(s_pos, world_xz)) {
+            vis = 0.0;
+        }
+        if (vis > 0.0) {
+            for (var i = 0u; i < material.building_count; i = i + 1u) {
+                let blocked = select(
+                    ray_intersects_box(s_pos, world_xz, material.buildings[i]),
+                    ray_intersects_box_aerial(s_pos, world_xz, material.buildings[i]),
+                    is_aerial
+                );
+                if (blocked) {
+                    vis = 0.0;
+                    break;
+                }
             }
         }
     }

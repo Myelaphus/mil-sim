@@ -1,11 +1,12 @@
 pub mod buildings;
 
 use crate::common::types::{
-    AppState, CurrentLevel, LevelEntity, RTS_ROAD_WIDTH, RTS_WORLD_HALF_SIZE, RTS_WORLD_SIZE,
-    WORLD_HALF_SIZE, WORLD_SIZE,
+    AppState, Corpse, CurrentLevel, LevelEntity, RTS_ROAD_WIDTH, RTS_WORLD_HALF_SIZE,
+    RTS_WORLD_SIZE, Soldier, WORLD_HALF_SIZE, WORLD_SIZE,
 };
 use bevy::ecs::message::MessageCursor;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 pub use buildings::*;
 
@@ -34,7 +35,10 @@ impl Plugin for WorldPlugin {
                 OnEnter(AppState::InGame),
                 (setup_level_world, reset_camera_to_spawn),
             )
-            .add_systems(Update, update_camera.run_if(in_state(AppState::InGame)));
+            .add_systems(
+                Update,
+                (update_camera, sync_elevation_visual_scale).run_if(in_state(AppState::InGame)),
+            );
     }
 }
 
@@ -301,6 +305,215 @@ pub fn setup_level_world(
             },
         ));
     }
+
+    // Spawn the dense patch of forest on the right (+X) side of the test_level_4 map.
+    // Each tree has a trunk collider (`LowWallCollider`) spaced so infantry can pass through
+    // between the trees while the APC cannot drive through the forest.
+    if level == CurrentLevel::Level4 {
+        let trunk_mesh = meshes.add(Cylinder::new(TREE_TRUNK_HALF_SIZE, 2.6));
+        let canopy_sphere_mesh = meshes.add(Sphere::new(1.0));
+        let trunk_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.36, 0.24, 0.14),
+            perceptual_roughness: 0.92,
+            ..default()
+        });
+        let canopy_dark_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.14, 0.31, 0.15),
+            perceptual_roughness: 0.88,
+            ..default()
+        });
+        let canopy_light_material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.20, 0.40, 0.18),
+            perceptual_roughness: 0.85,
+            ..default()
+        });
+
+        for (idx, tree_pos) in level_4_forest_trees().into_iter().enumerate() {
+            let scale_var = 0.92 + ((idx * 37) % 17) as f32 * 0.01;
+            let tree_entity = commands
+                .spawn((
+                    LevelEntity,
+                    Tree,
+                    LowWallCollider {
+                        half_size: Vec2::splat(TREE_TRUNK_HALF_SIZE),
+                    },
+                    Mesh3d(trunk_mesh.clone()),
+                    MeshMaterial3d(trunk_material.clone()),
+                    Transform::from_xyz(tree_pos.x, 1.3, tree_pos.y),
+                ))
+                .id();
+
+            // Lower foliage crown
+            commands.spawn((
+                Mesh3d(canopy_sphere_mesh.clone()),
+                MeshMaterial3d(if idx % 2 == 0 {
+                    canopy_dark_material.clone()
+                } else {
+                    canopy_light_material.clone()
+                }),
+                Transform::from_xyz(0.0, 1.45, 0.0)
+                    .with_scale(Vec3::new(1.42 * scale_var, 1.25 * scale_var, 1.42 * scale_var)),
+                ChildOf(tree_entity),
+            ));
+
+            // Upper foliage crown
+            commands.spawn((
+                Mesh3d(canopy_sphere_mesh.clone()),
+                MeshMaterial3d(if idx % 2 == 0 {
+                    canopy_light_material.clone()
+                } else {
+                    canopy_dark_material.clone()
+                }),
+                Transform::from_xyz(0.0, 2.35, 0.0)
+                    .with_scale(Vec3::new(1.02 * scale_var, 1.08 * scale_var, 1.02 * scale_var)),
+                ChildOf(tree_entity),
+            ));
+        }
+
+        // Spawn the Western Ridgeline on the left (-X) side of the Level 4 village (`X in [-96.0, -44.0]`)
+        // using stacked topographic contour layers with progressive highland colors and contour rims.
+        let contour_rim_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.10, 0.14, 0.09, 0.55),
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.95,
+            ..default()
+        });
+        let ridge_tiers: [(f32, Color); 6] = [
+            (1.0, Color::srgb(0.25, 0.38, 0.22)),
+            (2.2, Color::srgb(0.30, 0.40, 0.23)),
+            (3.4, Color::srgb(0.36, 0.42, 0.25)),
+            (4.6, Color::srgb(0.42, 0.44, 0.28)),
+            (5.8, Color::srgb(0.49, 0.47, 0.32)),
+            (6.7, Color::srgb(0.56, 0.52, 0.37)),
+        ];
+        for (tier_idx, (elev_m, tier_color)) in ridge_tiers.into_iter().enumerate() {
+            // Invert `(1 - u^2)^2 = elev_m / RIDGE_MAX_HEIGHT` to get exact contour band width
+            let ratio = (elev_m / RIDGE_MAX_HEIGHT).clamp(0.01, 0.99);
+            let u_bound = (1.0 - ratio.sqrt().sqrt()).max(0.05).sqrt();
+            let east_x = RIDGE_CREST_X + u_bound * RIDGE_EAST_WIDTH;
+            let west_x = RIDGE_CREST_X - u_bound * RIDGE_WEST_WIDTH;
+            let width_x = (east_x - west_x).max(2.0);
+            let center_x = 0.5 * (east_x + west_x);
+            let half_z = RIDGE_Z_FLAT_HALF + u_bound * RIDGE_Z_SHOULDER;
+            let length_z = half_z * 2.0;
+
+            let y_rim = 0.003 + (tier_idx as f32) * 0.0042;
+            let y_fill = y_rim + 0.0018;
+
+            // Dark topographic contour outline rim
+            commands.spawn((
+                LevelEntity,
+                Ridgeline,
+                NotShadowCaster,
+                Mesh3d(
+                    meshes.add(
+                        Plane3d::default()
+                            .mesh()
+                            .size(width_x + 0.7, length_z + 0.7),
+                    ),
+                ),
+                MeshMaterial3d(contour_rim_mat.clone()),
+                Transform::from_xyz(center_x, y_rim, RIDGE_Z_CENTER),
+            ));
+
+            // Topographic elevation plateau fill
+            let tier_mat = materials.add(StandardMaterial {
+                base_color: tier_color,
+                perceptual_roughness: 0.92,
+                ..default()
+            });
+            commands.spawn((
+                LevelEntity,
+                Ridgeline,
+                NotShadowCaster,
+                Mesh3d(meshes.add(Plane3d::default().mesh().size(width_x, length_z))),
+                MeshMaterial3d(tier_mat),
+                Transform::from_xyz(center_x, y_fill, RIDGE_Z_CENTER),
+            ));
+        }
+
+        // Spawn the negative-elevation sunken trench depression (`h < 0.0m`) between the ridgeline toe and the village
+        let trench_outer_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.18, 0.16, 0.12),
+            perceptual_roughness: 0.96,
+            ..default()
+        });
+        let trench_floor_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.12, 0.11, 0.08),
+            perceptual_roughness: 0.98,
+            ..default()
+        });
+        commands.spawn((
+            LevelEntity,
+            Trench,
+            NotShadowCaster,
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(
+                LEVEL_4_TRENCH_HALF_WIDTH_X * 2.0,
+                (LEVEL_4_TRENCH_FLAT_HALF_Z + LEVEL_4_TRENCH_SHOULDER_Z) * 2.0,
+            ))),
+            MeshMaterial3d(trench_outer_mat),
+            Transform::from_xyz(LEVEL_4_TRENCH_CENTER.x, 0.005, LEVEL_4_TRENCH_CENTER.y),
+        ));
+        commands.spawn((
+            LevelEntity,
+            Trench,
+            NotShadowCaster,
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(
+                LEVEL_4_TRENCH_HALF_WIDTH_X * 1.25,
+                LEVEL_4_TRENCH_FLAT_HALF_Z * 1.85,
+            ))),
+            MeshMaterial3d(trench_floor_mat),
+            Transform::from_xyz(LEVEL_4_TRENCH_CENTER.x, 0.008, LEVEL_4_TRENCH_CENTER.y),
+        ));
+    }
+}
+
+/// Scales the visual size of infantry (`Soldier`) and ground vehicles (`ApcVehicle`, `FieldArtillery`)
+/// based on their terrain elevation (`h` in meters relative to base elevation `0.0m`):
+/// - Higher elevations (`h > 0.0m`, e.g. on the Western Ridgeline) appear slightly larger.
+/// - Below base elevation (`h < 0.0m`, e.g. in a sunken trench or artillery crater) appear slightly smaller.
+pub fn sync_elevation_visual_scale(
+    current_level: Option<Res<CurrentLevel>>,
+    depressions_q: Query<&ElevationDepression, Without<Camera3d>>,
+    mut soldiers_q: Query<
+        &mut Transform,
+        (
+            With<Soldier>,
+            Without<Corpse>,
+            Without<crate::vehicle::MountedInVehicle>,
+            Without<crate::vehicle::ApcVehicle>,
+            Without<crate::vehicle::FieldArtillery>,
+            Without<Camera3d>,
+        ),
+    >,
+    mut vehicles_q: Query<
+        &mut Transform,
+        (
+            Or<(
+                With<crate::vehicle::ApcVehicle>,
+                With<crate::vehicle::FieldArtillery>,
+            )>,
+            Without<Soldier>,
+            Without<Camera3d>,
+        ),
+    >,
+) {
+    let level = current_level.as_deref().copied().unwrap_or_default();
+    let depressions: Vec<ElevationDepression> = depressions_q.iter().copied().collect();
+
+    for mut s_tf in &mut soldiers_q {
+        let pos = Vec2::new(s_tf.translation.x, s_tf.translation.z);
+        let elev = terrain_elevation_with_depressions(pos, level, &depressions);
+        let scale = elevation_visual_scale(elev);
+        s_tf.scale = Vec3::splat(scale);
+    }
+
+    for mut v_tf in &mut vehicles_q {
+        let pos = Vec2::new(v_tf.translation.x, v_tf.translation.z);
+        let elev = terrain_elevation_with_depressions(pos, level, &depressions);
+        let scale = elevation_visual_scale(elev);
+        v_tf.scale = Vec3::splat(scale);
+    }
 }
 
 #[cfg(test)]
@@ -462,6 +675,197 @@ mod tests {
             "Scrolling up should zoom camera in closer to the ground, got {} vs prev={}",
             zoom_after_in,
             zoom_after_out
+        );
+    }
+
+    #[test]
+    fn test_level_4_western_ridgeline_and_elevation_scaling_for_infantry_and_vehicles() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.insert_resource(CurrentLevel::Level4);
+        app.add_systems(Startup, setup_level_world);
+        app.add_systems(Update, sync_elevation_visual_scale);
+        app.update();
+
+        // 1. Verify the Western Ridgeline contour layers spawned on the left (-X) side of the village
+        let ridge_layers: Vec<&Transform> = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Ridgeline>>()
+            .iter(app.world())
+            .collect();
+        assert!(
+            ridge_layers.len() >= 10,
+            "Expected stacked topographic contour layers for the Western Ridgeline, got {}",
+            ridge_layers.len()
+        );
+        for tf in &ridge_layers {
+            assert!(
+                tf.translation.x < -40.0,
+                "Western Ridgeline must be on the left (-X) side of the village, got x={}",
+                tf.translation.x
+            );
+        }
+
+        // 2. Verify terrain_elevation values at crest (+7.0m), base valley (0.0m), and sunken trench (-1.8m)
+        let crest_pos = Vec2::new(RIDGE_CREST_X, RIDGE_Z_CENTER);
+        let base_pos = Vec2::new(0.0, 0.0);
+        let trench_pos = LEVEL_4_TRENCH_CENTER;
+
+        let h_crest = terrain_elevation(crest_pos, CurrentLevel::Level4);
+        let h_base = terrain_elevation(base_pos, CurrentLevel::Level4);
+        let h_trench = terrain_elevation(trench_pos, CurrentLevel::Level4);
+
+        assert!(
+            (h_crest - RIDGE_MAX_HEIGHT).abs() < 0.05,
+            "Ridgeline crest should have elevation ~{:.1}m, got {:.2}m",
+            RIDGE_MAX_HEIGHT,
+            h_crest
+        );
+        assert!(
+            h_base.abs() < 1e-4,
+            "Valley floor should be at base elevation 0.0m, got {:.2}m",
+            h_base
+        );
+        assert!(
+            h_trench < -1.5,
+            "Sunken trench should be below base elevation (< -1.5m), got {:.2}m",
+            h_trench
+        );
+
+        // 3. Spawn infantry and vehicles at high elevation (ridge crest), base elevation (valley),
+        //    and below base elevation (trench + artillery crater) and verify visual scaling
+        let soldier_high = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(crest_pos.x, 0.05, crest_pos.y),
+                Soldier::default(),
+            ))
+            .id();
+        let soldier_base = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(base_pos.x, 0.05, base_pos.y),
+                Soldier::default(),
+            ))
+            .id();
+        let soldier_trench = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(trench_pos.x, 0.05, trench_pos.y),
+                Soldier::default(),
+            ))
+            .id();
+
+        let crater_pos = Vec2::new(12.0, 85.0);
+        app.world_mut().spawn(ElevationDepression {
+            center: crater_pos,
+            radius: 4.0,
+            depth: 1.5,
+        });
+        let soldier_crater = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(crater_pos.x, 0.05, crater_pos.y),
+                Soldier::default(),
+            ))
+            .id();
+
+        let apc_high = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(crest_pos.x, 1.15, crest_pos.y + 8.0),
+                crate::vehicle::ApcVehicle::default(),
+            ))
+            .id();
+        let apc_base = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(base_pos.x, 1.15, base_pos.y + 8.0),
+                crate::vehicle::ApcVehicle::default(),
+            ))
+            .id();
+        let apc_trench = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(trench_pos.x, 1.15, trench_pos.y),
+                crate::vehicle::ApcVehicle::default(),
+            ))
+            .id();
+
+        app.update();
+
+        let s_high_scale = app.world().get::<Transform>(soldier_high).unwrap().scale.x;
+        let s_base_scale = app.world().get::<Transform>(soldier_base).unwrap().scale.x;
+        let s_trench_scale = app.world().get::<Transform>(soldier_trench).unwrap().scale.x;
+        let s_crater_scale = app.world().get::<Transform>(soldier_crater).unwrap().scale.x;
+
+        assert!(
+            s_high_scale > s_base_scale && (s_base_scale - 1.0).abs() < 1e-4,
+            "Infantry at higher elevation ({:.3}) must appear slightly larger than at base elevation ({:.3})",
+            s_high_scale,
+            s_base_scale
+        );
+        assert!(
+            s_trench_scale < s_base_scale && s_crater_scale < s_base_scale,
+            "Infantry in a trench ({:.3}) or crater ({:.3}) below base elevation must appear slightly smaller than at base ({:.3})",
+            s_trench_scale,
+            s_crater_scale,
+            s_base_scale
+        );
+
+        let v_high_scale = app.world().get::<Transform>(apc_high).unwrap().scale.x;
+        let v_base_scale = app.world().get::<Transform>(apc_base).unwrap().scale.x;
+        let v_trench_scale = app.world().get::<Transform>(apc_trench).unwrap().scale.x;
+
+        assert!(
+            v_high_scale > v_base_scale && v_trench_scale < v_base_scale,
+            "Vehicles on the ridgeline ({:.3}) must appear larger than base ({:.3}) and smaller in depressions ({:.3})",
+            v_high_scale,
+            v_base_scale,
+            v_trench_scale
+        );
+
+        // 4. Verify realistic ridgeline line-of-sight occlusion and slope movement physics:
+        //    - Observer in valley cannot see through the ridgeline crest to a target on the reverse slope.
+        //    - Observer on the ridgeline crest CAN see down into the valley and gets extended vision range.
+        let valley_observer = Vec2::new(-40.0, 0.0);
+        let reverse_slope_target = Vec2::new(-82.0, 0.0);
+        assert!(
+            !crate::common::geometry::can_see_target(
+                valley_observer,
+                Vec2::new(-1.0, 0.0),
+                reverse_slope_target,
+                50.0,
+                45.0_f32.to_radians(),
+                2.5,
+                &[],
+            ),
+            "Observer on valley floor should not see through the ridgeline to the reverse slope"
+        );
+        assert!(
+            crate::common::geometry::can_see_target(
+                crest_pos,
+                Vec2::new(1.0, 0.0),
+                Vec2::new(crest_pos.x + 29.0, crest_pos.y),
+                24.0,
+                45.0_f32.to_radians(),
+                2.5,
+                &[],
+            ),
+            "Spotter on the +7m ridgeline crest should see 29m down into the valley thanks to the high-ground vision bonus"
+        );
+
+        let slope_pos = Vec2::new(-56.0, 0.0); // Forward eastern slope of the ridgeline
+        let uphill_mult =
+            elevation_movement_multiplier(slope_pos, Vec2::new(-1.0, 0.0), CurrentLevel::Level4);
+        let downhill_mult =
+            elevation_movement_multiplier(slope_pos, Vec2::new(1.0, 0.0), CurrentLevel::Level4);
+        assert!(
+            uphill_mult < 1.0 && downhill_mult > 1.0,
+            "Moving uphill ({:.2}) should be slower than flat ground and downhill ({:.2}) faster",
+            uphill_mult,
+            downhill_mult
         );
     }
 }
